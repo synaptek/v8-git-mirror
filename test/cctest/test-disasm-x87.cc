@@ -29,11 +29,12 @@
 
 #include "src/v8.h"
 
-#include "src/debug.h"
+#include "src/debug/debug.h"
 #include "src/disasm.h"
 #include "src/disassembler.h"
 #include "src/ic/ic.h"
 #include "src/macro-assembler.h"
+#include "src/x87/frames-x87.h"
 #include "test/cctest/cctest.h"
 
 using namespace v8::internal;

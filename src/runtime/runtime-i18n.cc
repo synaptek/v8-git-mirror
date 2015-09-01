@@ -4,13 +4,15 @@
 
 
 #ifdef V8_I18N_SUPPORT
-#include "src/v8.h"
+#include "src/runtime/runtime-utils.h"
 
+#include "src/api.h"
 #include "src/api-natives.h"
 #include "src/arguments.h"
+#include "src/factory.h"
 #include "src/i18n.h"
+#include "src/isolate-inl.h"
 #include "src/messages.h"
-#include "src/runtime/runtime-utils.h"
 
 #include "unicode/brkiter.h"
 #include "unicode/calendar.h"
@@ -351,7 +353,7 @@ RUNTIME_FUNCTION(Runtime_InternalDateFormat) {
 
   Handle<Object> value;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, value,
-                                     Execution::ToNumber(isolate, date));
+                                     Object::ToNumber(isolate, date));
 
   icu::SimpleDateFormat* date_format =
       DateFormat::UnpackDateFormat(isolate, date_format_holder);
@@ -445,7 +447,7 @@ RUNTIME_FUNCTION(Runtime_InternalNumberFormat) {
 
   Handle<Object> value;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, value,
-                                     Execution::ToNumber(isolate, number));
+                                     Object::ToNumber(isolate, number));
 
   icu::DecimalFormat* number_format =
       NumberFormat::UnpackNumberFormat(isolate, number_format_holder);
@@ -626,7 +628,7 @@ RUNTIME_FUNCTION(Runtime_CreateBreakIterator) {
 
   local_object->SetInternalField(0, reinterpret_cast<Smi*>(break_iterator));
   // Make sure that the pointer to adopted text is NULL.
-  local_object->SetInternalField(1, reinterpret_cast<Smi*>(NULL));
+  local_object->SetInternalField(1, static_cast<Smi*>(nullptr));
 
   Factory* factory = isolate->factory();
   Handle<String> key = factory->NewStringFromStaticChars("breakIterator");

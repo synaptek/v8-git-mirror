@@ -6,8 +6,8 @@
 #define V8_TYPES_H_
 
 #include "src/conversions.h"
-#include "src/factory.h"
 #include "src/handles.h"
+#include "src/objects.h"
 #include "src/ostreams.h"
 
 namespace v8 {
@@ -207,8 +207,8 @@ namespace internal {
   V(Symbol,              1u << 12 | REPRESENTATION(kTaggedPointer)) \
   V(InternalizedString,  1u << 13 | REPRESENTATION(kTaggedPointer)) \
   V(OtherString,         1u << 14 | REPRESENTATION(kTaggedPointer)) \
-  V(Undetectable,        1u << 15 | REPRESENTATION(kTaggedPointer)) \
-  /* Unused semantic bit 1u << 16 in case you are looking for a bit. */ \
+  V(Simd,                1u << 15 | REPRESENTATION(kTaggedPointer)) \
+  V(Undetectable,        1u << 16 | REPRESENTATION(kTaggedPointer)) \
   V(OtherObject,         1u << 17 | REPRESENTATION(kTaggedPointer)) \
   V(Proxy,               1u << 18 | REPRESENTATION(kTaggedPointer)) \
   V(Internal,            1u << 19 | REPRESENTATION(kTagged | kUntagged)) \
@@ -231,7 +231,7 @@ namespace internal {
   V(NumberOrString,      kNumber | kString) \
   V(NumberOrUndefined,   kNumber | kUndefined) \
   V(PlainPrimitive,      kNumberOrString | kBoolean | kNullOrUndefined) \
-  V(Primitive,           kSymbol | kPlainPrimitive) \
+  V(Primitive,           kSymbol | kSimd | kPlainPrimitive) \
   V(DetectableReceiver,  kOtherObject | kProxy) \
   V(Detectable,          kDetectableReceiver | kNumber | kName) \
   V(Object,              kOtherObject | kUndetectable) \
@@ -277,6 +277,7 @@ namespace internal {
 //   typedef Range;
 //   typedef Region;
 //   template<class> struct Handle { typedef type; }  // No template typedefs...
+//
 //   template<class T> static Handle<T>::type null_handle();
 //   template<class T> static Handle<T>::type handle(T* t);  // !is_bitset(t)
 //   template<class T> static Handle<T>::type cast(Handle<Type>::type);
@@ -422,6 +423,11 @@ class TypeImpl : public Config::Base {
     }
     return function;
   }
+
+#define CONSTRUCT_SIMD_TYPE(NAME, Name, name, lane_count, lane_type) \
+  static TypeHandle Name(Isolate* isolate, Region* region);
+  SIMD128_TYPES(CONSTRUCT_SIMD_TYPE)
+#undef CONSTRUCT_SIMD_TYPE
 
   static TypeHandle Union(TypeHandle type1, TypeHandle type2, Region* reg);
   static TypeHandle Intersect(TypeHandle type1, TypeHandle type2, Region* reg);
@@ -1003,7 +1009,7 @@ struct ZoneTypeConfig {
 
   static const int kRangeStructTag = 0x1000;
 
-  template<class T> static inline T* null_handle();
+  template<class T> static inline T* null_handle() { return nullptr; }
   template<class T> static inline T* handle(T* type);
   template<class T> static inline T* cast(Type* type);
 
@@ -1058,7 +1064,9 @@ struct HeapTypeConfig {
 
   static const int kRangeStructTag = 0xffff;
 
-  template<class T> static inline i::Handle<T> null_handle();
+  template<class T> static inline i::Handle<T> null_handle() {
+    return i::Handle<T>();
+  }
   template<class T> static inline i::Handle<T> handle(T* type);
   template<class T> static inline i::Handle<T> cast(i::Handle<Type> type);
 
@@ -1126,8 +1134,8 @@ struct BoundsImpl {
   }
 
   // Unrestricted bounds.
-  static BoundsImpl Unbounded(Region* region) {
-    return BoundsImpl(Type::None(region), Type::Any(region));
+  static BoundsImpl Unbounded() {
+    return BoundsImpl(Type::None(), Type::Any());
   }
 
   // Meet: both b1 and b2 are known to hold.

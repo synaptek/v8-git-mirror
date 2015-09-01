@@ -2,13 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-var $observeNotifyChange;
 var $observeEnqueueSpliceRecord;
 var $observeBeginPerformSplice;
 var $observeEndPerformSplice;
-var $observeNativeObjectObserve;
-var $observeNativeObjectGetNotifier;
-var $observeNativeObjectNotifierPerformChange;
+
+var $observeObjectMethods;
+var $observeArrayMethods;
 
 (function(global, utils) {
 
@@ -676,27 +675,42 @@ function ObserveMicrotaskRunner() {
 
 // -------------------------------------------------------------------
 
-utils.InstallFunctions(GlobalObject, DONT_ENUM, [
-  "deliverChangeRecords", ObjectDeliverChangeRecords,
-  "getNotifier", ObjectGetNotifier,
-  "observe", ObjectObserve,
-  "unobserve", ObjectUnobserve
-]);
-utils.InstallFunctions(GlobalArray, DONT_ENUM, [
-  "observe", ArrayObserve,
-  "unobserve", ArrayUnobserve
-]);
 utils.InstallFunctions(notifierPrototype, DONT_ENUM, [
   "notify", ObjectNotifierNotify,
   "performChange", ObjectNotifierPerformChange
 ]);
 
-$observeNotifyChange = NotifyChange;
+$observeObjectMethods = [
+  "deliverChangeRecords", ObjectDeliverChangeRecords,
+  "getNotifier", ObjectGetNotifier,
+  "observe", ObjectObserve,
+  "unobserve", ObjectUnobserve
+];
+$observeArrayMethods = [
+  "observe", ArrayObserve,
+  "unobserve", ArrayUnobserve
+];
+
+// TODO(adamk): Figure out why this prototype removal has to
+// happen as part of initial snapshotting.
+var removePrototypeFn = function(f, i) {
+  if (i % 2 === 1) %FunctionRemovePrototype(f);
+};
+$observeObjectMethods.forEach(removePrototypeFn);
+$observeArrayMethods.forEach(removePrototypeFn);
+
 $observeEnqueueSpliceRecord = EnqueueSpliceRecord;
 $observeBeginPerformSplice = BeginPerformSplice;
 $observeEndPerformSplice = EndPerformSplice;
-$observeNativeObjectObserve = NativeObjectObserve;
-$observeNativeObjectGetNotifier = NativeObjectGetNotifier;
-$observeNativeObjectNotifierPerformChange = NativeObjectNotifierPerformChange;
+
+%InstallToContext([
+  "native_object_get_notifier", NativeObjectGetNotifier,
+  "native_object_notifier_perform_change", NativeObjectNotifierPerformChange,
+  "native_object_observe", NativeObjectObserve,
+  "observers_begin_perform_splice", BeginPerformSplice,
+  "observers_end_perform_splice", EndPerformSplice,
+  "observers_enqueue_splice", EnqueueSpliceRecord,
+  "observers_notify_change", NotifyChange,
+]);
 
 })

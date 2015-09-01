@@ -44,10 +44,6 @@ endif
 ifdef component
   GYPFLAGS += -Dcomponent=$(component)
 endif
-# console=readline
-ifdef console
-  GYPFLAGS += -Dconsole=$(console)
-endif
 # disassembler=on
 ifeq ($(disassembler), on)
   GYPFLAGS += -Dv8_enable_disassembler=1
@@ -218,6 +214,12 @@ endif
 # the specified values.
 ifeq ($(arm_test_noprobe), on)
   GYPFLAGS += -Darm_test_noprobe=on
+endif
+
+# Optionally enable wasm prototype.
+# Assume you've placed a link to v8-native-prototype in third_party/wasm.
+ifeq ($(wasm), on)
+  GYPFLAGS += -Dv8_wasm=1
 endif
 
 # ----------------- available targets: --------------------

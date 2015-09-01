@@ -169,8 +169,8 @@ void Displacement::init(Label* L, Type type) {
 
 const int RelocInfo::kApplyMask =
     RelocInfo::kCodeTargetMask | 1 << RelocInfo::RUNTIME_ENTRY |
-    1 << RelocInfo::JS_RETURN | 1 << RelocInfo::INTERNAL_REFERENCE |
-    1 << RelocInfo::CODE_AGE_SEQUENCE | RelocInfo::kDebugBreakSlotMask;
+    1 << RelocInfo::INTERNAL_REFERENCE | 1 << RelocInfo::CODE_AGE_SEQUENCE |
+    RelocInfo::kDebugBreakSlotMask;
 
 
 bool RelocInfo::IsCodedSpecially() {
@@ -2322,26 +2322,6 @@ void Assembler::movdqu(XMMRegister dst, const Operand& src) {
   EMIT(0x0F);
   EMIT(0x6F);
   emit_sse_operand(dst, src);
-}
-
-
-void Assembler::movntdqa(XMMRegister dst, const Operand& src) {
-  DCHECK(IsEnabled(SSE4_1));
-  EnsureSpace ensure_space(this);
-  EMIT(0x66);
-  EMIT(0x0F);
-  EMIT(0x38);
-  EMIT(0x2A);
-  emit_sse_operand(dst, src);
-}
-
-
-void Assembler::movntdq(const Operand& dst, XMMRegister src) {
-  EnsureSpace ensure_space(this);
-  EMIT(0x66);
-  EMIT(0x0F);
-  EMIT(0xE7);
-  emit_sse_operand(src, dst);
 }
 
 

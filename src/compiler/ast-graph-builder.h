@@ -230,12 +230,6 @@ class AstGraphBuilder : public AstVisitor {
   // frame states with the undefined values.
   void ClearNonLiveSlotsInFrameStates();
 
-  // Helper to wrap a Handle<T> into a Unique<T>.
-  template <class T>
-  Unique<T> MakeUnique(Handle<T> object) {
-    return Unique<T>::CreateUninitialized(object);
-  }
-
   Node** EnsureInputBufferSize(int size);
 
   // Named and keyed loads require a VectorSlotPair for successful lowering.
@@ -315,8 +309,8 @@ class AstGraphBuilder : public AstVisitor {
                          TypeFeedbackId id, int slot_index);
 
   // Builders for accessing the function context.
-  Node* BuildLoadBuiltinsObject();
   Node* BuildLoadGlobalObject();
+  Node* BuildLoadNativeContextField(int index);
   Node* BuildLoadGlobalProxy();
   Node* BuildLoadFeedbackVector();
 
@@ -347,8 +341,10 @@ class AstGraphBuilder : public AstVisitor {
 
   // Builders for dynamic hole-checks at runtime.
   Node* BuildHoleCheckSilent(Node* value, Node* for_hole, Node* not_hole);
-  Node* BuildHoleCheckThrow(Node* value, Variable* var, Node* not_hole,
-                            BailoutId bailout_id);
+  Node* BuildHoleCheckThenThrow(Node* value, Variable* var, Node* not_hole,
+                                BailoutId bailout_id);
+  Node* BuildHoleCheckElseThrow(Node* value, Variable* var, Node* for_hole,
+                                BailoutId bailout_id);
 
   // Builders for conditional errors.
   Node* BuildThrowIfStaticPrototype(Node* name, BailoutId bailout_id);
@@ -386,6 +382,9 @@ class AstGraphBuilder : public AstVisitor {
 
   // Common for all IterationStatement bodies.
   void VisitIterationBody(IterationStatement* stmt, LoopBuilder* loop);
+
+  // Dispatched from VisitCall.
+  void VisitCallSuper(Call* expr);
 
   // Dispatched from VisitCallRuntime.
   void VisitCallJSRuntime(CallRuntime* expr);

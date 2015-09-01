@@ -2,11 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
-
 #include "src/heap-profiler.h"
 
 #include "src/allocation-tracker.h"
+#include "src/api.h"
 #include "src/heap-snapshot-generator-inl.h"
 
 namespace v8 {
@@ -184,6 +183,9 @@ void HeapProfiler::ClearHeapObjectMap() {
   ids_.Reset(new HeapObjectsMap(heap()));
   if (!is_tracking_allocations()) is_tracking_object_moves_ = false;
 }
+
+
+Heap* HeapProfiler::heap() const { return ids_->heap(); }
 
 
 }  // namespace internal

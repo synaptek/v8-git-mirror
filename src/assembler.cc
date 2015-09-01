@@ -45,14 +45,14 @@
 #include "src/codegen.h"
 #include "src/counters.h"
 #include "src/cpu-profiler.h"
-#include "src/debug.h"
+#include "src/debug/debug.h"
 #include "src/deoptimizer.h"
 #include "src/execution.h"
 #include "src/ic/ic.h"
 #include "src/ic/stub-cache.h"
-#include "src/jsregexp.h"
-#include "src/regexp-macro-assembler.h"
-#include "src/regexp-stack.h"
+#include "src/regexp/jsregexp.h"
+#include "src/regexp/regexp-macro-assembler.h"
+#include "src/regexp/regexp-stack.h"
 #include "src/runtime/runtime.h"
 #include "src/snapshot/serialize.h"
 #include "src/token.h"
@@ -80,21 +80,21 @@
 // Include native regexp-macro-assembler.
 #ifndef V8_INTERPRETED_REGEXP
 #if V8_TARGET_ARCH_IA32
-#include "src/ia32/regexp-macro-assembler-ia32.h"  // NOLINT
+#include "src/regexp/ia32/regexp-macro-assembler-ia32.h"  // NOLINT
 #elif V8_TARGET_ARCH_X64
-#include "src/x64/regexp-macro-assembler-x64.h"  // NOLINT
+#include "src/regexp/x64/regexp-macro-assembler-x64.h"  // NOLINT
 #elif V8_TARGET_ARCH_ARM64
-#include "src/arm64/regexp-macro-assembler-arm64.h"  // NOLINT
+#include "src/regexp/arm64/regexp-macro-assembler-arm64.h"  // NOLINT
 #elif V8_TARGET_ARCH_ARM
-#include "src/arm/regexp-macro-assembler-arm.h"  // NOLINT
+#include "src/regexp/arm/regexp-macro-assembler-arm.h"  // NOLINT
 #elif V8_TARGET_ARCH_PPC
-#include "src/ppc/regexp-macro-assembler-ppc.h"  // NOLINT
+#include "src/regexp/ppc/regexp-macro-assembler-ppc.h"  // NOLINT
 #elif V8_TARGET_ARCH_MIPS
-#include "src/mips/regexp-macro-assembler-mips.h"  // NOLINT
+#include "src/regexp/mips/regexp-macro-assembler-mips.h"  // NOLINT
 #elif V8_TARGET_ARCH_MIPS64
-#include "src/mips64/regexp-macro-assembler-mips64.h"  // NOLINT
+#include "src/regexp/mips64/regexp-macro-assembler-mips64.h"  // NOLINT
 #elif V8_TARGET_ARCH_X87
-#include "src/x87/regexp-macro-assembler-x87.h"  // NOLINT
+#include "src/regexp/x87/regexp-macro-assembler-x87.h"  // NOLINT
 #else  // Unknown architecture.
 #error "Unknown architecture."
 #endif  // Target architecture.
@@ -157,6 +157,10 @@ AssemblerBase::~AssemblerBase() {
 
 // -----------------------------------------------------------------------------
 // Implementation of PredictableCodeSizeScope
+
+PredictableCodeSizeScope::PredictableCodeSizeScope(AssemblerBase* assembler)
+    : PredictableCodeSizeScope(assembler, -1) {}
+
 
 PredictableCodeSizeScope::PredictableCodeSizeScope(AssemblerBase* assembler,
                                                    int expected_size)
@@ -747,8 +751,6 @@ const char* RelocInfo::RelocModeName(RelocInfo::Mode rmode) {
       return "property cell";
     case RUNTIME_ENTRY:
       return "runtime entry";
-    case JS_RETURN:
-      return "js return";
     case COMMENT:
       return "comment";
     case POSITION:
@@ -769,12 +771,16 @@ const char* RelocInfo::RelocModeName(RelocInfo::Mode rmode) {
       return "veneer pool";
     case DEBUG_BREAK_SLOT_AT_POSITION:
       return "debug break slot at position";
+    case DEBUG_BREAK_SLOT_AT_RETURN:
+      return "debug break slot at return";
     case DEBUG_BREAK_SLOT_AT_CALL:
       return "debug break slot at call";
     case DEBUG_BREAK_SLOT_AT_CONSTRUCT_CALL:
       return "debug break slot at construct call";
     case CODE_AGE_SEQUENCE:
-      return "code_age_sequence";
+      return "code age sequence";
+    case GENERATOR_CONTINUATION:
+      return "generator continuation";
     case NUMBER_OF_MODES:
     case PC_JUMP:
       UNREACHABLE();
@@ -858,7 +864,6 @@ void RelocInfo::Verify(Isolate* isolate) {
       break;
     }
     case RUNTIME_ENTRY:
-    case JS_RETURN:
     case COMMENT:
     case POSITION:
     case STATEMENT_POSITION:
@@ -867,8 +872,10 @@ void RelocInfo::Verify(Isolate* isolate) {
     case CONST_POOL:
     case VENEER_POOL:
     case DEBUG_BREAK_SLOT_AT_POSITION:
+    case DEBUG_BREAK_SLOT_AT_RETURN:
     case DEBUG_BREAK_SLOT_AT_CALL:
     case DEBUG_BREAK_SLOT_AT_CONSTRUCT_CALL:
+    case GENERATOR_CONTINUATION:
     case NONE32:
     case NONE64:
       break;
@@ -973,24 +980,18 @@ ExternalReference::ExternalReference(Builtins::Name name, Isolate* isolate)
   : address_(isolate->builtins()->builtin_address(name)) {}
 
 
-ExternalReference::ExternalReference(Runtime::FunctionId id,
-                                     Isolate* isolate)
-  : address_(Redirect(isolate, Runtime::FunctionForId(id)->entry)) {}
+ExternalReference::ExternalReference(Runtime::FunctionId id, Isolate* isolate)
+    : address_(Redirect(isolate, Runtime::FunctionForId(id)->entry)) {}
 
 
 ExternalReference::ExternalReference(const Runtime::Function* f,
                                      Isolate* isolate)
-  : address_(Redirect(isolate, f->entry)) {}
+    : address_(Redirect(isolate, f->entry)) {}
 
 
 ExternalReference ExternalReference::isolate_address(Isolate* isolate) {
   return ExternalReference(isolate);
 }
-
-
-ExternalReference::ExternalReference(const IC_Utility& ic_utility,
-                                     Isolate* isolate)
-  : address_(Redirect(isolate, ic_utility.address())) {}
 
 
 ExternalReference::ExternalReference(StatsCounter* counter)
@@ -1139,7 +1140,7 @@ ExternalReference ExternalReference::new_space_start(Isolate* isolate) {
 
 
 ExternalReference ExternalReference::store_buffer_top(Isolate* isolate) {
-  return ExternalReference(isolate->heap()->store_buffer()->TopAddress());
+  return ExternalReference(isolate->heap()->store_buffer_top_address());
 }
 
 
@@ -1494,14 +1495,15 @@ ExternalReference ExternalReference::mod_two_doubles_operation(
 }
 
 
-ExternalReference ExternalReference::debug_break(Isolate* isolate) {
-  return ExternalReference(Redirect(isolate, FUNCTION_ADDR(Debug_Break)));
-}
-
-
 ExternalReference ExternalReference::debug_step_in_fp_address(
     Isolate* isolate) {
   return ExternalReference(isolate->debug()->step_in_fp_addr());
+}
+
+
+ExternalReference ExternalReference::fixed_typed_array_base_data_offset() {
+  return ExternalReference(reinterpret_cast<void*>(
+      FixedTypedArrayBase::kDataOffset - kHeapObjectTag));
 }
 
 
@@ -1803,29 +1805,17 @@ void Assembler::RecordComment(const char* msg) {
 }
 
 
-void Assembler::RecordJSReturn() {
-  positions_recorder()->WriteRecordedPositions();
+void Assembler::RecordGeneratorContinuation() {
   EnsureSpace ensure_space(this);
-  RecordRelocInfo(RelocInfo::JS_RETURN);
+  RecordRelocInfo(RelocInfo::GENERATOR_CONTINUATION);
 }
 
 
-void Assembler::RecordDebugBreakSlot() {
+void Assembler::RecordDebugBreakSlot(RelocInfo::Mode mode, int call_argc) {
   EnsureSpace ensure_space(this);
-  RecordRelocInfo(RelocInfo::DEBUG_BREAK_SLOT_AT_POSITION);
-}
-
-
-void Assembler::RecordDebugBreakSlotForCall(int argc) {
-  EnsureSpace ensure_space(this);
-  intptr_t data = static_cast<intptr_t>(argc);
-  RecordRelocInfo(RelocInfo::DEBUG_BREAK_SLOT_AT_CALL, data);
-}
-
-
-void Assembler::RecordDebugBreakSlotForConstructCall() {
-  EnsureSpace ensure_space(this);
-  RecordRelocInfo(RelocInfo::DEBUG_BREAK_SLOT_AT_CONSTRUCT_CALL);
+  DCHECK(RelocInfo::IsDebugBreakSlot(mode));
+  intptr_t data = static_cast<intptr_t>(call_argc);
+  RecordRelocInfo(mode, data);
 }
 
 

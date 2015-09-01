@@ -12,6 +12,19 @@
 namespace v8 {
 namespace internal {
 
+// Give alias names to registers for calling conventions.
+const Register kReturnRegister0 = {kRegister_v0_Code};
+const Register kReturnRegister1 = {kRegister_v1_Code};
+const Register kJSFunctionRegister = {kRegister_a1_Code};
+const Register kContextRegister = {Register::kCpRegister};
+const Register kInterpreterAccumulatorRegister = {kRegister_v0_Code};
+const Register kInterpreterRegisterFileRegister = {kRegister_t3_Code};
+const Register kInterpreterBytecodeOffsetRegister = {kRegister_t4_Code};
+const Register kInterpreterBytecodeArrayRegister = {kRegister_t5_Code};
+const Register kInterpreterDispatchTableRegister = {kRegister_t6_Code};
+const Register kRuntimeCallFunctionRegister = {kRegister_a1_Code};
+const Register kRuntimeCallArgCountRegister = {kRegister_a0_Code};
+
 // Forward declaration.
 class JumpTarget;
 
@@ -674,6 +687,17 @@ class MacroAssembler: public Assembler {
     sw(src4, MemOperand(sp, 0 * kPointerSize));
   }
 
+  // Push five registers. Pushes leftmost register first (to highest address).
+  void Push(Register src1, Register src2, Register src3, Register src4,
+            Register src5) {
+    Subu(sp, sp, Operand(5 * kPointerSize));
+    sw(src1, MemOperand(sp, 4 * kPointerSize));
+    sw(src2, MemOperand(sp, 3 * kPointerSize));
+    sw(src3, MemOperand(sp, 2 * kPointerSize));
+    sw(src4, MemOperand(sp, 1 * kPointerSize));
+    sw(src5, MemOperand(sp, 0 * kPointerSize));
+  }
+
   void Push(Register src, Condition cond, Register tst1, Register tst2) {
     // Since we don't have conditional execution we use a Branch.
     Branch(3, cond, tst1, Operand(tst2));
@@ -1017,11 +1041,8 @@ class MacroAssembler: public Assembler {
   // function and jumps to the miss label if the fast checks fail. The
   // function register will be untouched; the other registers may be
   // clobbered.
-  void TryGetFunctionPrototype(Register function,
-                               Register result,
-                               Register scratch,
-                               Label* miss,
-                               bool miss_on_bound_function = false);
+  void TryGetFunctionPrototype(Register function, Register result,
+                               Register scratch, Label* miss);
 
   void GetObjectType(Register function,
                      Register map,
@@ -1221,19 +1242,19 @@ const Operand& rt = Operand(zero_reg), BranchDelaySlot bd = PROTECT
   void CallJSExitStub(CodeStub* stub);
 
   // Call a runtime routine.
-  void CallRuntime(const Runtime::Function* f,
-                   int num_arguments,
-                   SaveFPRegsMode save_doubles = kDontSaveFPRegs);
+  void CallRuntime(const Runtime::Function* f, int num_arguments,
+                   SaveFPRegsMode save_doubles = kDontSaveFPRegs,
+                   BranchDelaySlot bd = PROTECT);
   void CallRuntimeSaveDoubles(Runtime::FunctionId id) {
     const Runtime::Function* function = Runtime::FunctionForId(id);
     CallRuntime(function, function->nargs, kSaveFPRegs);
   }
 
   // Convenience function: Same as above, but takes the fid instead.
-  void CallRuntime(Runtime::FunctionId id,
-                   int num_arguments,
-                   SaveFPRegsMode save_doubles = kDontSaveFPRegs) {
-    CallRuntime(Runtime::FunctionForId(id), num_arguments, save_doubles);
+  void CallRuntime(Runtime::FunctionId id, int num_arguments,
+                   SaveFPRegsMode save_doubles = kDontSaveFPRegs,
+                   BranchDelaySlot bd = PROTECT) {
+    CallRuntime(Runtime::FunctionForId(id), num_arguments, save_doubles, bd);
   }
 
   // Convenience function: call an external reference.
@@ -1303,18 +1324,16 @@ const Operand& rt = Operand(zero_reg), BranchDelaySlot bd = PROTECT
   void JumpToExternalReference(const ExternalReference& builtin,
                                BranchDelaySlot bd = PROTECT);
 
-  // Invoke specified builtin JavaScript function. Adds an entry to
-  // the unresolved list if the name does not resolve.
-  void InvokeBuiltin(Builtins::JavaScript id,
-                     InvokeFlag flag,
+  // Invoke specified builtin JavaScript function.
+  void InvokeBuiltin(int native_context_index, InvokeFlag flag,
                      const CallWrapper& call_wrapper = NullCallWrapper());
 
   // Store the code object for the given builtin in the target register and
   // setup the function in a1.
-  void GetBuiltinEntry(Register target, Builtins::JavaScript id);
+  void GetBuiltinEntry(Register target, int native_context_index);
 
   // Store the function for the given builtin in the target register.
-  void GetBuiltinFunction(Register target, Builtins::JavaScript id);
+  void GetBuiltinFunction(Register target, int native_context_index);
 
   struct Unresolved {
     int pc;
@@ -1574,15 +1593,6 @@ const Operand& rt = Operand(zero_reg), BranchDelaySlot bd = PROTECT
   void EnterFrame(StackFrame::Type type, bool load_constant_pool_pointer_reg);
   void LeaveFrame(StackFrame::Type type);
 
-  // Patch the relocated value (lui/ori pair).
-  void PatchRelocatedValue(Register li_location,
-                           Register scratch,
-                           Register new_value);
-  // Get the relocatad value (loaded data) from the lui/ori pair.
-  void GetRelocatedValue(Register li_location,
-                         Register value,
-                         Register scratch);
-
   // Expects object in a0 and returns map with validated enum cache
   // in a0.  Assumes that any other register can be used as a scratch.
   void CheckEnumCache(Register null_value, Label* call_runtime);
@@ -1648,10 +1658,6 @@ const Operand& rt = Operand(zero_reg), BranchDelaySlot bd = PROTECT
                       InvokeFlag flag,
                       const CallWrapper& call_wrapper);
 
-  // Get the code for the given builtin. Returns if able to resolve
-  // the function in the 'resolved' flag.
-  Handle<Code> ResolveBuiltin(Builtins::JavaScript id, bool* resolved);
-
   void InitializeNewString(Register string,
                            Register length,
                            Heap::RootListIndex map_index,
@@ -1703,7 +1709,7 @@ class CodePatcher {
   CodePatcher(byte* address,
               int instructions,
               FlushICache flush_cache = FLUSH);
-  virtual ~CodePatcher();
+  ~CodePatcher();
 
   // Macro assembler to emit code.
   MacroAssembler* masm() { return &masm_; }

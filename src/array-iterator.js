@@ -10,7 +10,18 @@ var $arrayValues;
 
 %CheckIsBootstrapping();
 
+// -----------------------------------------------------------------------
+// Imports
+
+var arrayIterationKindSymbol =
+    utils.ImportNow("array_iteration_kind_symbol");
+var arrayIteratorNextIndexSymbol =
+    utils.ImportNow("array_iterator_next_symbol");
+var arrayIteratorObjectSymbol =
+    utils.ImportNow("array_iterator_object_symbol");
 var GlobalArray = global.Array;
+var iteratorSymbol = utils.ImportNow("iterator_symbol");
+var toStringTagSymbol = utils.ImportNow("to_string_tag_symbol");
 
 macro TYPED_ARRAYS(FUNCTION)
   FUNCTION(Uint8Array)
@@ -30,10 +41,7 @@ endmacro
 
 TYPED_ARRAYS(COPY_FROM_GLOBAL)
 
-var arrayIteratorObjectSymbol = GLOBAL_PRIVATE("ArrayIterator#object");
-var arrayIteratorNextIndexSymbol = GLOBAL_PRIVATE("ArrayIterator#next");
-var arrayIterationKindSymbol = GLOBAL_PRIVATE("ArrayIterator#kind");
-
+// -----------------------------------------------------------------------
 
 function ArrayIterator() {}
 
@@ -45,7 +53,7 @@ function ArrayIterator() {}
 
 // 15.4.5.1 CreateArrayIterator Abstract Operation
 function CreateArrayIterator(array, kind) {
-  var object = $toObject(array);
+  var object = TO_OBJECT(array);
   var iterator = new ArrayIterator;
   SET_PRIVATE(iterator, arrayIteratorObjectSymbol, object);
   SET_PRIVATE(iterator, arrayIteratorNextIndexSymbol, 0);
@@ -68,7 +76,7 @@ function ArrayIteratorIterator() {
 
 // 15.4.5.2.2 ArrayIterator.prototype.next( )
 function ArrayIteratorNext() {
-  var iterator = $toObject(this);
+  var iterator = TO_OBJECT(this);
 
   if (!HAS_DEFINED_PRIVATE(iterator, arrayIteratorNextIndexSymbol)) {
     throw MakeTypeError(kIncompatibleMethodReceiver,
@@ -126,10 +134,10 @@ function ArrayKeys() {
 utils.InstallFunctions(ArrayIterator.prototype, DONT_ENUM, [
   'next', ArrayIteratorNext
 ]);
-utils.SetFunctionName(ArrayIteratorIterator, symbolIterator);
-%AddNamedProperty(ArrayIterator.prototype, symbolIterator,
+utils.SetFunctionName(ArrayIteratorIterator, iteratorSymbol);
+%AddNamedProperty(ArrayIterator.prototype, iteratorSymbol,
                   ArrayIteratorIterator, DONT_ENUM);
-%AddNamedProperty(ArrayIterator.prototype, symbolToStringTag,
+%AddNamedProperty(ArrayIterator.prototype, toStringTagSymbol,
                   "Array Iterator", READ_ONLY | DONT_ENUM);
 
 utils.InstallFunctions(GlobalArray.prototype, DONT_ENUM, [
@@ -138,14 +146,18 @@ utils.InstallFunctions(GlobalArray.prototype, DONT_ENUM, [
   'keys', ArrayKeys
 ]);
 
-%AddNamedProperty(GlobalArray.prototype, symbolIterator, ArrayValues,
+// TODO(adam): Remove this call once 'values' is in the above
+// InstallFunctions block, as it'll be redundant.
+utils.SetFunctionName(ArrayValues, 'values');
+
+%AddNamedProperty(GlobalArray.prototype, iteratorSymbol, ArrayValues,
                   DONT_ENUM);
 
 macro EXTEND_TYPED_ARRAY(NAME)
   %AddNamedProperty(GlobalNAME.prototype, 'entries', ArrayEntries, DONT_ENUM);
   %AddNamedProperty(GlobalNAME.prototype, 'values', ArrayValues, DONT_ENUM);
   %AddNamedProperty(GlobalNAME.prototype, 'keys', ArrayKeys, DONT_ENUM);
-  %AddNamedProperty(GlobalNAME.prototype, symbolIterator, ArrayValues,
+  %AddNamedProperty(GlobalNAME.prototype, iteratorSymbol, ArrayValues,
                     DONT_ENUM);
 endmacro
 
@@ -159,5 +171,7 @@ utils.Export(function(to) {
 });
 
 $arrayValues = ArrayValues;
+
+%InstallToContext(["array_values_iterator", ArrayValues]);
 
 })

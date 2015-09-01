@@ -2,12 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
+#include "src/runtime/runtime-utils.h"
 
 #include "src/arguments.h"
-#include "src/jsregexp-inl.h"
-#include "src/jsregexp.h"
+#include "src/conversions-inl.h"
+#include "src/isolate-inl.h"
 #include "src/messages.h"
+#include "src/regexp/jsregexp-inl.h"
+#include "src/regexp/jsregexp.h"
 #include "src/runtime/runtime-utils.h"
 #include "src/string-builder.h"
 #include "src/string-search.h"
@@ -643,7 +645,7 @@ MUST_USE_RESULT static Object* StringReplaceGlobalRegExpWithEmptyString(
   if (!heap->lo_space()->Contains(*answer)) {
     heap->CreateFillerObjectAt(end_of_string, delta);
   }
-  heap->AdjustLiveBytes(answer->address(), -delta, Heap::CONCURRENT_TO_SWEEPER);
+  heap->AdjustLiveBytes(*answer, -delta, Heap::CONCURRENT_TO_SWEEPER);
   return *answer;
 }
 
@@ -784,7 +786,7 @@ RUNTIME_FUNCTION(Runtime_RegExpExec) {
 }
 
 
-RUNTIME_FUNCTION(Runtime_RegExpConstructResultRT) {
+RUNTIME_FUNCTION(Runtime_RegExpConstructResult) {
   HandleScope handle_scope(isolate);
   DCHECK(args.length() == 3);
   CONVERT_SMI_ARG_CHECKED(size, 0);
@@ -802,12 +804,6 @@ RUNTIME_FUNCTION(Runtime_RegExpConstructResultRT) {
   array->InObjectPropertyAtPut(JSRegExpResult::kIndexIndex, *index);
   array->InObjectPropertyAtPut(JSRegExpResult::kInputIndex, *input);
   return *array;
-}
-
-
-RUNTIME_FUNCTION(Runtime_RegExpConstructResult) {
-  SealHandleScope shs(isolate);
-  return __RT_impl_Runtime_RegExpConstructResultRT(args, isolate);
 }
 
 

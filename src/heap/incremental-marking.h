@@ -5,7 +5,6 @@
 #ifndef V8_HEAP_INCREMENTAL_MARKING_H_
 #define V8_HEAP_INCREMENTAL_MARKING_H_
 
-
 #include "src/execution.h"
 #include "src/heap/mark-compact.h"
 #include "src/objects.h"
@@ -25,6 +24,21 @@ class IncrementalMarking {
   enum ForceCompletionAction { FORCE_COMPLETION, DO_NOT_FORCE_COMPLETION };
 
   enum GCRequestType { COMPLETE_MARKING, OVERAPPROXIMATION };
+
+  struct StepActions {
+    StepActions(CompletionAction complete_action_,
+                ForceMarkingAction force_marking_,
+                ForceCompletionAction force_completion_)
+        : completion_action(complete_action_),
+          force_marking(force_marking_),
+          force_completion(force_completion_) {}
+
+    CompletionAction completion_action;
+    ForceMarkingAction force_marking;
+    ForceCompletionAction force_completion;
+  };
+
+  static StepActions IdleStepActions();
 
   explicit IncrementalMarking(Heap* heap);
 
@@ -67,9 +81,7 @@ class IncrementalMarking {
 
   bool WasActivated();
 
-  void Start(int mark_compact_flags);
-
-  void Stop();
+  void Start(const char* reason = nullptr);
 
   void MarkObjectGroups();
 
@@ -79,7 +91,7 @@ class IncrementalMarking {
 
   void Finalize();
 
-  void Abort();
+  void Stop();
 
   void OverApproximateWeakClosure(CompletionAction action);
 

@@ -4,8 +4,6 @@
 
 #include <limits.h>  // For LONG_MIN, LONG_MAX.
 
-#include "src/v8.h"
-
 #if V8_TARGET_ARCH_ARM
 
 #include "src/base/bits.h"
@@ -13,7 +11,7 @@
 #include "src/bootstrapper.h"
 #include "src/codegen.h"
 #include "src/cpu-profiler.h"
-#include "src/debug.h"
+#include "src/debug/debug.h"
 #include "src/runtime/runtime.h"
 
 namespace v8 {
@@ -427,7 +425,7 @@ void MacroAssembler::LoadRoot(Register destination,
       !predictable_code_size()) {
     // The CPU supports fast immediate values, and this root will never
     // change. We will load it as a relocatable immediate value.
-    Handle<Object> root(&isolate()->heap()->roots_array_start()[index]);
+    Handle<Object> root = isolate()->heap()->root_handle(index);
     mov(destination, Operand(root), LeaveCC, cond);
     return;
   }
@@ -1434,7 +1432,8 @@ void MacroAssembler::IsObjectNameType(Register object,
 
 void MacroAssembler::DebugBreak() {
   mov(r0, Operand::Zero());
-  mov(r1, Operand(ExternalReference(Runtime::kDebugBreak, isolate())));
+  mov(r1,
+      Operand(ExternalReference(Runtime::kHandleDebuggerStatement, isolate())));
   CEntryStub ces(isolate(), 1);
   DCHECK(AllowThisStubCall(&ces));
   Call(ces.GetCode(), RelocInfo::DEBUGGER_STATEMENT);
@@ -2217,34 +2216,8 @@ void MacroAssembler::GetMapConstructor(Register result, Register map,
 }
 
 
-void MacroAssembler::TryGetFunctionPrototype(Register function,
-                                             Register result,
-                                             Register scratch,
-                                             Label* miss,
-                                             bool miss_on_bound_function) {
-  Label non_instance;
-  if (miss_on_bound_function) {
-    // Check that the receiver isn't a smi.
-    JumpIfSmi(function, miss);
-
-    // Check that the function really is a function.  Load map into result reg.
-    CompareObjectType(function, result, scratch, JS_FUNCTION_TYPE);
-    b(ne, miss);
-
-    ldr(scratch,
-        FieldMemOperand(function, JSFunction::kSharedFunctionInfoOffset));
-    ldr(scratch,
-        FieldMemOperand(scratch, SharedFunctionInfo::kCompilerHintsOffset));
-    tst(scratch,
-        Operand(Smi::FromInt(1 << SharedFunctionInfo::kBoundFunction)));
-    b(ne, miss);
-
-    // Make sure that the function has an instance prototype.
-    ldrb(scratch, FieldMemOperand(result, Map::kBitFieldOffset));
-    tst(scratch, Operand(1 << Map::kHasNonInstancePrototype));
-    b(ne, &non_instance);
-  }
-
+void MacroAssembler::TryGetFunctionPrototype(Register function, Register result,
+                                             Register scratch, Label* miss) {
   // Get the prototype or initial map from the function.
   ldr(result,
       FieldMemOperand(function, JSFunction::kPrototypeOrInitialMapOffset));
@@ -2263,15 +2236,6 @@ void MacroAssembler::TryGetFunctionPrototype(Register function,
 
   // Get the prototype from the initial map.
   ldr(result, FieldMemOperand(result, Map::kPrototypeOffset));
-
-  if (miss_on_bound_function) {
-    jmp(&done);
-
-    // Non-instance prototype: Fetch prototype from constructor field
-    // in initial map.
-    bind(&non_instance);
-    GetMapConstructor(result, result, scratch, ip);
-  }
 
   // All done.
   bind(&done);
@@ -2543,13 +2507,12 @@ void MacroAssembler::JumpToExternalReference(const ExternalReference& builtin) {
 }
 
 
-void MacroAssembler::InvokeBuiltin(Builtins::JavaScript id,
-                                   InvokeFlag flag,
+void MacroAssembler::InvokeBuiltin(int native_context_index, InvokeFlag flag,
                                    const CallWrapper& call_wrapper) {
   // You can't call a builtin without a valid frame.
   DCHECK(flag == JUMP_FUNCTION || has_frame());
 
-  GetBuiltinEntry(r2, id);
+  GetBuiltinEntry(r2, native_context_index);
   if (flag == CALL_FUNCTION) {
     call_wrapper.BeforeCall(CallSize(r2));
     Call(r2);
@@ -2562,20 +2525,20 @@ void MacroAssembler::InvokeBuiltin(Builtins::JavaScript id,
 
 
 void MacroAssembler::GetBuiltinFunction(Register target,
-                                        Builtins::JavaScript id) {
+                                        int native_context_index) {
   // Load the builtins object into target register.
   ldr(target,
       MemOperand(cp, Context::SlotOffset(Context::GLOBAL_OBJECT_INDEX)));
-  ldr(target, FieldMemOperand(target, GlobalObject::kBuiltinsOffset));
+  ldr(target, FieldMemOperand(target, GlobalObject::kNativeContextOffset));
   // Load the JavaScript builtin function from the builtins object.
-  ldr(target, FieldMemOperand(target,
-                          JSBuiltinsObject::OffsetOfFunctionWithId(id)));
+  ldr(target, ContextOperand(target, native_context_index));
 }
 
 
-void MacroAssembler::GetBuiltinEntry(Register target, Builtins::JavaScript id) {
+void MacroAssembler::GetBuiltinEntry(Register target,
+                                     int native_context_index) {
   DCHECK(!target.is(r1));
-  GetBuiltinFunction(r1, id);
+  GetBuiltinFunction(r1, native_context_index);
   // Load the code entry point from the builtins object.
   ldr(target, FieldMemOperand(r1, JSFunction::kCodeEntryOffset));
 }
@@ -3383,75 +3346,6 @@ void MacroAssembler::CallCFunctionHelper(Register function,
     ldr(sp, MemOperand(sp, stack_passed_arguments * kPointerSize));
   } else {
     add(sp, sp, Operand(stack_passed_arguments * kPointerSize));
-  }
-}
-
-
-void MacroAssembler::GetRelocatedValueLocation(Register ldr_location,
-                                               Register result,
-                                               Register scratch) {
-  Label small_constant_pool_load, load_result;
-  ldr(result, MemOperand(ldr_location));
-
-  if (FLAG_enable_embedded_constant_pool) {
-    // Check if this is an extended constant pool load.
-    and_(scratch, result, Operand(GetConsantPoolLoadMask()));
-    teq(scratch, Operand(GetConsantPoolLoadPattern()));
-    b(eq, &small_constant_pool_load);
-    if (emit_debug_code()) {
-      // Check that the instruction sequence is:
-      //   movw reg, #offset_low
-      //   movt reg, #offset_high
-      //   ldr reg, [pp, reg]
-      Instr patterns[] = {GetMovWPattern(), GetMovTPattern(),
-                          GetLdrPpRegOffsetPattern()};
-      for (int i = 0; i < 3; i++) {
-        ldr(result, MemOperand(ldr_location, i * kInstrSize));
-        and_(result, result, Operand(patterns[i]));
-        cmp(result, Operand(patterns[i]));
-        Check(eq, kTheInstructionToPatchShouldBeALoadFromConstantPool);
-      }
-      // Result was clobbered. Restore it.
-      ldr(result, MemOperand(ldr_location));
-    }
-
-    // Get the offset into the constant pool.  First extract movw immediate into
-    // result.
-    and_(scratch, result, Operand(0xfff));
-    mov(ip, Operand(result, LSR, 4));
-    and_(ip, ip, Operand(0xf000));
-    orr(result, scratch, Operand(ip));
-    // Then extract movt immediate and or into result.
-    ldr(scratch, MemOperand(ldr_location, kInstrSize));
-    and_(ip, scratch, Operand(0xf0000));
-    orr(result, result, Operand(ip, LSL, 12));
-    and_(scratch, scratch, Operand(0xfff));
-    orr(result, result, Operand(scratch, LSL, 16));
-
-    b(&load_result);
-  }
-
-  bind(&small_constant_pool_load);
-  if (emit_debug_code()) {
-    // Check that the instruction is a ldr reg, [<pc or pp> + offset] .
-    and_(result, result, Operand(GetConsantPoolLoadPattern()));
-    cmp(result, Operand(GetConsantPoolLoadPattern()));
-    Check(eq, kTheInstructionToPatchShouldBeALoadFromConstantPool);
-    // Result was clobbered. Restore it.
-    ldr(result, MemOperand(ldr_location));
-  }
-
-  // Get the offset into the constant pool.
-  const uint32_t kLdrOffsetMask = (1 << 12) - 1;
-  and_(result, result, Operand(kLdrOffsetMask));
-
-  bind(&load_result);
-  // Get the address of the constant.
-  if (FLAG_enable_embedded_constant_pool) {
-    add(result, pp, Operand(result));
-  } else {
-    add(result, ldr_location, Operand(result));
-    add(result, result, Operand(Instruction::kPCReadOffset));
   }
 }
 

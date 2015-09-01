@@ -2,11 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
-
-#include "src/cpu-profiler-inl.h"
+#include "src/cpu-profiler.h"
 
 #include "src/compiler.h"
+#include "src/cpu-profiler-inl.h"
 #include "src/deoptimizer.h"
 #include "src/frames-inl.h"
 #include "src/hashmap.h"
@@ -31,6 +30,9 @@ ProfilerEventsProcessor::ProfilerEventsProcessor(ProfileGenerator* generator,
       period_(period),
       last_code_event_id_(0),
       last_processed_code_event_id_(0) {}
+
+
+ProfilerEventsProcessor::~ProfilerEventsProcessor() {}
 
 
 void ProfilerEventsProcessor::Enqueue(const CodeEventsContainer& event) {

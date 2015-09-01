@@ -13,6 +13,19 @@
 namespace v8 {
 namespace internal {
 
+// Give alias names to registers for calling conventions.
+const Register kReturnRegister0 = {kRegister_r3_Code};
+const Register kReturnRegister1 = {kRegister_r4_Code};
+const Register kJSFunctionRegister = {kRegister_r4_Code};
+const Register kContextRegister = {kRegister_r30_Code};
+const Register kInterpreterAccumulatorRegister = {kRegister_r3_Code};
+const Register kInterpreterRegisterFileRegister = {kRegister_r14_Code};
+const Register kInterpreterBytecodeOffsetRegister = {kRegister_r15_Code};
+const Register kInterpreterBytecodeArrayRegister = {kRegister_r16_Code};
+const Register kInterpreterDispatchTableRegister = {kRegister_r17_Code};
+const Register kRuntimeCallFunctionRegister = {kRegister_r4_Code};
+const Register kRuntimeCallArgCountRegister = {kRegister_r3_Code};
+
 // ----------------------------------------------------------------------------
 // Static helper functions
 
@@ -127,13 +140,17 @@ class MacroAssembler : public Assembler {
   void Call(Handle<Code> code, RelocInfo::Mode rmode = RelocInfo::CODE_TARGET,
             TypeFeedbackId ast_id = TypeFeedbackId::None(),
             Condition cond = al);
-  void Ret(Condition cond = al);
+  void Ret() { blr(); }
+  void Ret(Condition cond, CRegister cr = cr7) { bclr(cond, cr); }
 
   // Emit code to discard a non-negative number of pointer-sized elements
   // from the stack, clobbering only the sp register.
-  void Drop(int count, Condition cond = al);
+  void Drop(int count);
 
-  void Ret(int drop, Condition cond = al);
+  void Ret(int drop) {
+    Drop(drop);
+    blr();
+  }
 
   void Call(Label* target);
 
@@ -148,8 +165,11 @@ class MacroAssembler : public Assembler {
   void Move(Register dst, Register src, Condition cond = al);
   void Move(DoubleRegister dst, DoubleRegister src);
 
-  void MultiPush(RegList regs);
-  void MultiPop(RegList regs);
+  void MultiPush(RegList regs, Register location = sp);
+  void MultiPop(RegList regs, Register location = sp);
+
+  void MultiPushDoubles(RegList dregs, Register location = sp);
+  void MultiPopDoubles(RegList dregs, Register location = sp);
 
   // Load an object from the root table.
   void LoadRoot(Register destination, Heap::RootListIndex index,
@@ -213,7 +233,7 @@ class MacroAssembler : public Assembler {
   // |object| is the object being stored into, |value| is the object being
   // stored.  value and scratch registers are clobbered by the operation.
   // The offset is the offset from the start of the object, not the offset from
-  // the tagged HeapObject pointer.  For use with FieldOperand(reg, off).
+  // the tagged HeapObject pointer.  For use with FieldMemOperand(reg, off).
   void RecordWriteField(
       Register object, int offset, Register value, Register scratch,
       LinkRegisterStatus lr_status, SaveFPRegsMode save_fp,
@@ -684,8 +704,7 @@ class MacroAssembler : public Assembler {
   // function register will be untouched; the other registers may be
   // clobbered.
   void TryGetFunctionPrototype(Register function, Register result,
-                               Register scratch, Label* miss,
-                               bool miss_on_bound_function = false);
+                               Register scratch, Label* miss);
 
   // Compare object type for heap object.  heap_object contains a non-Smi
   // whose object type should be compared with the given type.  This both
@@ -868,27 +887,9 @@ class MacroAssembler : public Assembler {
 
   void BranchOnNoOverflow(Label* label) { bge(label, cr0); }
 
-  void RetOnOverflow(void) {
-    Label label;
+  void RetOnOverflow(void) { Ret(lt, cr0); }
 
-    blt(&label, cr0);
-    Ret();
-    bind(&label);
-  }
-
-  void RetOnNoOverflow(void) {
-    Label label;
-
-    bge(&label, cr0);
-    Ret();
-    bind(&label);
-  }
-
-  // Pushes <count> double values to <location>, starting from d<first>.
-  void SaveFPRegs(Register location, int first, int count);
-
-  // Pops <count> double values from <location>, starting from d<first>.
-  void RestoreFPRegs(Register location, int first, int count);
+  void RetOnNoOverflow(void) { Ret(ge, cr0); }
 
   // ---------------------------------------------------------------------------
   // Runtime calls
@@ -970,17 +971,16 @@ class MacroAssembler : public Assembler {
   // Jump to a runtime routine.
   void JumpToExternalReference(const ExternalReference& builtin);
 
-  // Invoke specified builtin JavaScript function. Adds an entry to
-  // the unresolved list if the name does not resolve.
-  void InvokeBuiltin(Builtins::JavaScript id, InvokeFlag flag,
+  // Invoke specified builtin JavaScript function.
+  void InvokeBuiltin(int native_context_index, InvokeFlag flag,
                      const CallWrapper& call_wrapper = NullCallWrapper());
 
   // Store the code object for the given builtin in the target register and
   // setup the function in r1.
-  void GetBuiltinEntry(Register target, Builtins::JavaScript id);
+  void GetBuiltinEntry(Register target, int native_context_index);
 
   // Store the function for the given builtin in the target register.
-  void GetBuiltinFunction(Register target, Builtins::JavaScript id);
+  void GetBuiltinFunction(Register target, int native_context_index);
 
   Handle<Object> CodeObject() {
     DCHECK(!code_object_.is_null());
@@ -1364,11 +1364,6 @@ class MacroAssembler : public Assembler {
   // Caller must place the instruction word at <location> in <result>.
   void DecodeConstantPoolOffset(Register result, Register location);
 
-  // Retrieve/patch the relocated value (lis/ori pair or constant pool load).
-  void GetRelocatedValue(Register location, Register result, Register scratch);
-  void SetRelocatedValue(Register location, Register scratch,
-                         Register new_value);
-
   void ClampUint8(Register output_reg, Register input_reg);
 
   // Saturate a value into 8-bit unsigned integer
@@ -1526,7 +1521,7 @@ class CodePatcher {
   enum FlushICache { FLUSH, DONT_FLUSH };
 
   CodePatcher(byte* address, int instructions, FlushICache flush_cache = FLUSH);
-  virtual ~CodePatcher();
+  ~CodePatcher();
 
   // Macro assembler to emit code.
   MacroAssembler* masm() { return &masm_; }
@@ -1549,7 +1544,7 @@ class CodePatcher {
 // -----------------------------------------------------------------------------
 // Static helper functions.
 
-inline MemOperand ContextOperand(Register context, int index) {
+inline MemOperand ContextOperand(Register context, int index = 0) {
   return MemOperand(context, Context::SlotOffset(index));
 }
 

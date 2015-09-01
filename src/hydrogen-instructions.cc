@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
+#include "src/hydrogen-instructions.h"
 
 #include "src/base/bits.h"
 #include "src/double.h"
@@ -74,33 +74,26 @@ void HValue::InferRepresentation(HInferRepresentationPhase* h_infer) {
 
 Representation HValue::RepresentationFromUses() {
   if (HasNoUses()) return Representation::None();
-
-  // Array of use counts for each representation.
-  int use_count[Representation::kNumRepresentations] = { 0 };
+  Representation result = Representation::None();
 
   for (HUseIterator it(uses()); !it.Done(); it.Advance()) {
     HValue* use = it.value();
     Representation rep = use->observed_input_representation(it.index());
-    if (rep.IsNone()) continue;
+    result = result.generalize(rep);
+
     if (FLAG_trace_representation) {
       PrintF("#%d %s is used by #%d %s as %s%s\n",
              id(), Mnemonic(), use->id(), use->Mnemonic(), rep.Mnemonic(),
              (use->CheckFlag(kTruncatingToInt32) ? "-trunc" : ""));
     }
-    use_count[rep.kind()] += 1;
   }
-  if (IsPhi()) HPhi::cast(this)->AddIndirectUsesTo(&use_count[0]);
-  int tagged_count = use_count[Representation::kTagged];
-  int double_count = use_count[Representation::kDouble];
-  int int32_count = use_count[Representation::kInteger32];
-  int smi_count = use_count[Representation::kSmi];
+  if (IsPhi()) {
+    result = result.generalize(
+        HPhi::cast(this)->representation_from_indirect_uses());
+  }
 
-  if (tagged_count > 0) return Representation::Tagged();
-  if (double_count > 0) return Representation::Double();
-  if (int32_count > 0) return Representation::Integer32();
-  if (smi_count > 0) return Representation::Smi();
-
-  return Representation::None();
+  // External representations are dealt with separately.
+  return result.IsExternal() ? Representation::None() : result;
 }
 
 
@@ -811,15 +804,15 @@ bool HInstruction::CanDeoptimize() {
     case HValue::kHasInstanceTypeAndBranch:
     case HValue::kInnerAllocatedObject:
     case HValue::kInstanceOf:
-    case HValue::kInstanceOfKnownGlobal:
     case HValue::kIsConstructCallAndBranch:
-    case HValue::kIsObjectAndBranch:
+    case HValue::kHasInPrototypeChainAndBranch:
     case HValue::kIsSmiAndBranch:
     case HValue::kIsStringAndBranch:
     case HValue::kIsUndetectableAndBranch:
     case HValue::kLeaveInlined:
     case HValue::kLoadFieldByIndex:
     case HValue::kLoadGlobalGeneric:
+    case HValue::kLoadGlobalViaContext:
     case HValue::kLoadNamedField:
     case HValue::kLoadNamedGeneric:
     case HValue::kLoadRoot:
@@ -833,6 +826,7 @@ bool HInstruction::CanDeoptimize() {
     case HValue::kSeqStringGetChar:
     case HValue::kStoreCodeEntry:
     case HValue::kStoreFrameContext:
+    case HValue::kStoreGlobalViaContext:
     case HValue::kStoreKeyed:
     case HValue::kStoreNamedField:
     case HValue::kStoreNamedGeneric:
@@ -879,6 +873,7 @@ bool HInstruction::CanDeoptimize() {
     case HValue::kMul:
     case HValue::kOsrEntry:
     case HValue::kPower:
+    case HValue::kPrologue:
     case HValue::kRor:
     case HValue::kSar:
     case HValue::kSeqStringSetChar:
@@ -1097,7 +1092,7 @@ std::ostream& HCallNewArray::PrintDataTo(std::ostream& os) const {  // NOLINT
 
 
 std::ostream& HCallRuntime::PrintDataTo(std::ostream& os) const {  // NOLINT
-  os << name()->ToCString().get() << " ";
+  os << function()->name << " ";
   if (save_doubles() == kSaveFPRegs) os << "[save doubles] ";
   return os << "#" << argument_count();
 }
@@ -1158,7 +1153,8 @@ Representation HBranch::observed_input_representation(int index) {
   if (expected_input_types_.Contains(ToBooleanStub::NULL_TYPE) ||
       expected_input_types_.Contains(ToBooleanStub::SPEC_OBJECT) ||
       expected_input_types_.Contains(ToBooleanStub::STRING) ||
-      expected_input_types_.Contains(ToBooleanStub::SYMBOL)) {
+      expected_input_types_.Contains(ToBooleanStub::SYMBOL) ||
+      expected_input_types_.Contains(ToBooleanStub::SIMD_VALUE)) {
     return Representation::Tagged();
   }
   if (expected_input_types_.Contains(ToBooleanStub::UNDEFINED)) {
@@ -1323,6 +1319,17 @@ static String* TypeOfString(HConstant* constant, Isolate* isolate) {
     }
     case SYMBOL_TYPE:
       return heap->symbol_string();
+    case SIMD128_VALUE_TYPE: {
+      Unique<Map> map = constant->ObjectMap();
+#define SIMD128_TYPE(TYPE, Type, type, lane_count, lane_type) \
+  if (map.IsKnownGlobal(heap->type##_map())) {                \
+    return heap->type##_string();                             \
+  }
+      SIMD128_TYPES(SIMD128_TYPE)
+#undef SIMD128_TYPE
+      UNREACHABLE();
+      return nullptr;
+    }
     case JS_FUNCTION_TYPE:
     case JS_FUNCTION_PROXY_TYPE:
       return heap->function_string();
@@ -1427,6 +1434,17 @@ HValue* HBitwise::Canonicalize() {
 }
 
 
+// static
+HInstruction* HAdd::New(Isolate* isolate, Zone* zone, HValue* context,
+                        HValue* left, HValue* right, Strength strength,
+                        ExternalAddType external_add_type) {
+  // For everything else, you should use the other factory method without
+  // ExternalAddType.
+  DCHECK_EQ(external_add_type, AddOfExternalAndTagged);
+  return new (zone) HAdd(context, left, right, strength, external_add_type);
+}
+
+
 Representation HAdd::RepresentationFromInputs() {
   Representation left_rep = left()->representation();
   if (left_rep.IsExternal()) {
@@ -1440,7 +1458,11 @@ Representation HAdd::RequiredInputRepresentation(int index) {
   if (index == 2) {
     Representation left_rep = left()->representation();
     if (left_rep.IsExternal()) {
-      return Representation::Integer32();
+      if (external_add_type_ == AddOfExternalAndTagged) {
+        return Representation::Tagged();
+      } else {
+        return Representation::Integer32();
+      }
     }
   }
   return HArithmeticBinaryOperation::RequiredInputRepresentation(index);
@@ -1717,7 +1739,7 @@ std::ostream& HCheckInstanceType::PrintDataTo(
 
 
 std::ostream& HCallStub::PrintDataTo(std::ostream& os) const {  // NOLINT
-  os << CodeStub::MajorName(major_key_, false) << " ";
+  os << CodeStub::MajorName(major_key_) << " ";
   return HUnaryCall::PrintDataTo(os);
 }
 
@@ -2455,11 +2477,8 @@ std::ostream& HPhi::PrintTo(std::ostream& os) const {  // NOLINT
   for (int i = 0; i < OperandCount(); ++i) {
     os << " " << NameOf(OperandAt(i)) << " ";
   }
-  return os << " uses:" << UseCount() << "_"
-            << smi_non_phi_uses() + smi_indirect_uses() << "s_"
-            << int32_non_phi_uses() + int32_indirect_uses() << "i_"
-            << double_non_phi_uses() + double_indirect_uses() << "d_"
-            << tagged_non_phi_uses() + tagged_indirect_uses() << "t"
+  return os << " uses" << UseCount()
+            << representation_from_indirect_uses().Mnemonic() << " "
             << TypeOf(this) << "]";
 }
 
@@ -2518,7 +2537,12 @@ void HPhi::InitRealUses(int phi_id) {
     HValue* value = it.value();
     if (!value->IsPhi()) {
       Representation rep = value->observed_input_representation(it.index());
-      non_phi_uses_[rep.kind()] += 1;
+      representation_from_non_phi_uses_ =
+          representation_from_non_phi_uses().generalize(rep);
+      if (rep.IsSmi() || rep.IsInteger32() || rep.IsDouble()) {
+        has_type_feedback_from_uses_ = true;
+      }
+
       if (FLAG_trace_representation) {
         PrintF("#%d Phi is used by real #%d %s as %s\n",
                id(), value->id(), value->Mnemonic(), rep.Mnemonic());
@@ -2538,24 +2562,16 @@ void HPhi::InitRealUses(int phi_id) {
 
 void HPhi::AddNonPhiUsesFrom(HPhi* other) {
   if (FLAG_trace_representation) {
-    PrintF("adding to #%d Phi uses of #%d Phi: s%d i%d d%d t%d\n",
-           id(), other->id(),
-           other->non_phi_uses_[Representation::kSmi],
-           other->non_phi_uses_[Representation::kInteger32],
-           other->non_phi_uses_[Representation::kDouble],
-           other->non_phi_uses_[Representation::kTagged]);
+    PrintF(
+        "generalizing use representation '%s' of #%d Phi "
+        "with uses of #%d Phi '%s'\n",
+        representation_from_indirect_uses().Mnemonic(), id(), other->id(),
+        other->representation_from_non_phi_uses().Mnemonic());
   }
 
-  for (int i = 0; i < Representation::kNumRepresentations; i++) {
-    indirect_uses_[i] += other->non_phi_uses_[i];
-  }
-}
-
-
-void HPhi::AddIndirectUsesTo(int* dest) {
-  for (int i = 0; i < Representation::kNumRepresentations; i++) {
-    dest[i] += indirect_uses_[i];
-  }
+  representation_from_indirect_uses_ =
+      representation_from_indirect_uses().generalize(
+          other->representation_from_non_phi_uses());
 }
 
 
@@ -3187,18 +3203,13 @@ Range* HLoadNamedField::InferRange(Zone* zone) {
 
 Range* HLoadKeyed::InferRange(Zone* zone) {
   switch (elements_kind()) {
-    case EXTERNAL_INT8_ELEMENTS:
     case INT8_ELEMENTS:
       return new(zone) Range(kMinInt8, kMaxInt8);
-    case EXTERNAL_UINT8_ELEMENTS:
-    case EXTERNAL_UINT8_CLAMPED_ELEMENTS:
     case UINT8_ELEMENTS:
     case UINT8_CLAMPED_ELEMENTS:
       return new(zone) Range(kMinUInt8, kMaxUInt8);
-    case EXTERNAL_INT16_ELEMENTS:
     case INT16_ELEMENTS:
       return new(zone) Range(kMinInt16, kMaxInt16);
-    case EXTERNAL_UINT16_ELEMENTS:
     case UINT16_ELEMENTS:
       return new(zone) Range(kMinUInt16, kMaxUInt16);
     default:
@@ -3241,29 +3252,6 @@ bool HCompareObjectEqAndBranch::KnownSuccessorBlock(HBasicBlock** block) {
   }
   if (FLAG_fold_constants && left()->IsConstant() && right()->IsConstant()) {
     *block = HConstant::cast(left())->DataEquals(HConstant::cast(right()))
-        ? FirstSuccessor() : SecondSuccessor();
-    return true;
-  }
-  *block = NULL;
-  return false;
-}
-
-
-bool ConstantIsObject(HConstant* constant, Isolate* isolate) {
-  if (constant->HasNumberValue()) return false;
-  if (constant->GetUnique().IsKnownGlobal(isolate->heap()->null_value())) {
-    return true;
-  }
-  if (constant->IsUndetectable()) return false;
-  InstanceType type = constant->GetInstanceType();
-  return (FIRST_NONCALLABLE_SPEC_OBJECT_TYPE <= type) &&
-         (type <= LAST_NONCALLABLE_SPEC_OBJECT_TYPE);
-}
-
-
-bool HIsObjectAndBranch::KnownSuccessorBlock(HBasicBlock** block) {
-  if (FLAG_fold_constants && value()->IsConstant()) {
-    *block = ConstantIsObject(HConstant::cast(value()), isolate())
         ? FirstSuccessor() : SecondSuccessor();
     return true;
   }
@@ -3441,11 +3429,11 @@ std::ostream& HLoadNamedGeneric::PrintDataTo(
 
 
 std::ostream& HLoadKeyed::PrintDataTo(std::ostream& os) const {  // NOLINT
-  if (!is_external()) {
+  if (!is_fixed_typed_array()) {
     os << NameOf(elements());
   } else {
-    DCHECK(elements_kind() >= FIRST_EXTERNAL_ARRAY_ELEMENTS_KIND &&
-           elements_kind() <= LAST_EXTERNAL_ARRAY_ELEMENTS_KIND);
+    DCHECK(elements_kind() >= FIRST_FIXED_TYPED_ARRAY_ELEMENTS_KIND &&
+           elements_kind() <= LAST_FIXED_TYPED_ARRAY_ELEMENTS_KIND);
     os << NameOf(elements()) << "." << ElementsKindToString(elements_kind());
   }
 
@@ -3480,7 +3468,7 @@ bool HLoadKeyed::UsesMustHandleHole() const {
     return false;
   }
 
-  if (IsExternalArrayElementsKind(elements_kind())) {
+  if (IsFixedTypedArrayElementsKind(elements_kind())) {
     return false;
   }
 
@@ -3520,7 +3508,7 @@ bool HLoadKeyed::RequiresHoleCheck() const {
     return false;
   }
 
-  if (IsExternalArrayElementsKind(elements_kind())) {
+  if (IsFixedTypedArrayElementsKind(elements_kind())) {
     return false;
   }
 
@@ -3579,6 +3567,13 @@ std::ostream& HStoreNamedGeneric::PrintDataTo(
 }
 
 
+std::ostream& HStoreGlobalViaContext::PrintDataTo(
+    std::ostream& os) const {  // NOLINT
+  return os << " depth:" << depth() << " slot:" << slot_index() << " = "
+            << NameOf(value());
+}
+
+
 std::ostream& HStoreNamedField::PrintDataTo(std::ostream& os) const {  // NOLINT
   os << NameOf(object()) << access_ << " = " << NameOf(value());
   if (NeedsWriteBarrier()) os << " (write-barrier)";
@@ -3588,11 +3583,11 @@ std::ostream& HStoreNamedField::PrintDataTo(std::ostream& os) const {  // NOLINT
 
 
 std::ostream& HStoreKeyed::PrintDataTo(std::ostream& os) const {  // NOLINT
-  if (!is_external()) {
+  if (!is_fixed_typed_array()) {
     os << NameOf(elements());
   } else {
-    DCHECK(elements_kind() >= FIRST_EXTERNAL_ARRAY_ELEMENTS_KIND &&
-           elements_kind() <= LAST_EXTERNAL_ARRAY_ELEMENTS_KIND);
+    DCHECK(elements_kind() >= FIRST_FIXED_TYPED_ARRAY_ELEMENTS_KIND &&
+           elements_kind() <= LAST_FIXED_TYPED_ARRAY_ELEMENTS_KIND);
     os << NameOf(elements()) << "." << ElementsKindToString(elements_kind());
   }
 
@@ -3626,6 +3621,12 @@ std::ostream& HTransitionElementsKind::PrintDataTo(
 std::ostream& HLoadGlobalGeneric::PrintDataTo(
     std::ostream& os) const {  // NOLINT
   return os << name()->ToCString().get() << " ";
+}
+
+
+std::ostream& HLoadGlobalViaContext::PrintDataTo(
+    std::ostream& os) const {  // NOLINT
+  return os << "depth:" << depth() << " slot:" << slot_index();
 }
 
 
@@ -3949,8 +3950,7 @@ bool HStoreKeyed::NeedsCanonicalization() {
   switch (value()->opcode()) {
     case kLoadKeyed: {
       ElementsKind load_kind = HLoadKeyed::cast(value())->elements_kind();
-      return IsExternalFloatOrDoubleElementsKind(load_kind) ||
-             IsFixedFloatElementsKind(load_kind);
+      return IsFixedFloatElementsKind(load_kind);
     }
     case kChange: {
       Representation from = HChange::cast(value())->from();
@@ -4409,13 +4409,13 @@ void HPhi::InferRepresentation(HInferRepresentationPhase* h_infer) {
 
 
 Representation HPhi::RepresentationFromInputs() {
-  bool has_type_feedback =
-      smi_non_phi_uses() + int32_non_phi_uses() + double_non_phi_uses() > 0;
   Representation r = representation();
   for (int i = 0; i < OperandCount(); ++i) {
     // Ignore conservative Tagged assumption of parameters if we have
     // reason to believe that it's too conservative.
-    if (has_type_feedback && OperandAt(i)->IsParameter()) continue;
+    if (has_type_feedback_from_uses() && OperandAt(i)->IsParameter()) {
+      continue;
+    }
 
     r = r.generalize(OperandAt(i)->KnownOptimalRepresentation());
   }

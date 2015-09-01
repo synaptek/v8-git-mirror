@@ -2,16 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
-
 #include "src/accessors.h"
+
 #include "src/api.h"
 #include "src/contexts.h"
 #include "src/deoptimizer.h"
 #include "src/execution.h"
 #include "src/factory.h"
 #include "src/frames-inl.h"
-#include "src/isolate.h"
+#include "src/isolate-inl.h"
 #include "src/list-inl.h"
 #include "src/messages.h"
 #include "src/property-details.h"
@@ -217,7 +216,7 @@ void Accessors::ArrayLengthSetter(
     }
 
     Handle<Object> number_v;
-    if (!Execution::ToNumber(isolate, length_obj).ToHandle(&number_v)) {
+    if (!Object::ToNumber(isolate, length_obj).ToHandle(&number_v)) {
       isolate->OptionalRescheduleException(false);
       return;
     }
@@ -978,7 +977,7 @@ void Accessors::FunctionLengthGetter(
   } else {
     // If the function isn't compiled yet, the length is not computed
     // correctly yet. Compile it now and return the right length.
-    if (Compiler::EnsureCompiled(function, KEEP_EXCEPTION)) {
+    if (Compiler::Compile(function, KEEP_EXCEPTION)) {
       length = function->shared()->length();
     }
     if (isolate->has_pending_exception()) {

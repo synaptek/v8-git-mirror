@@ -35,22 +35,22 @@
 #ifndef V8_ASSEMBLER_H_
 #define V8_ASSEMBLER_H_
 
-#include "src/v8.h"
-
 #include "src/allocation.h"
 #include "src/builtins.h"
-#include "src/gdb-jit.h"
 #include "src/isolate.h"
 #include "src/runtime/runtime.h"
 #include "src/token.h"
 
 namespace v8 {
 
+// Forward declarations.
 class ApiFunction;
 
 namespace internal {
 
+// Forward declarations.
 class StatsCounter;
+
 // -----------------------------------------------------------------------------
 // Platform independent assembler base class.
 
@@ -158,8 +158,10 @@ class DontEmitDebugCodeScope BASE_EMBEDDED {
 // snapshot and the running VM.
 class PredictableCodeSizeScope {
  public:
+  explicit PredictableCodeSizeScope(AssemblerBase* assembler);
   PredictableCodeSizeScope(AssemblerBase* assembler, int expected_size);
   ~PredictableCodeSizeScope();
+  void ExpectSize(int expected_size) { expected_size_ = expected_size; }
 
  private:
   AssemblerBase* assembler_;
@@ -370,13 +372,13 @@ class RelocInfo {
 
     // Everything after runtime_entry (inclusive) is not GC'ed.
     RUNTIME_ENTRY,
-    JS_RETURN,  // Marks start of the ExitJSFrame code.
     COMMENT,
     POSITION,            // See comment for kNoPosition above.
     STATEMENT_POSITION,  // See comment for kNoPosition above.
 
     // Additional code inserted for debug break slot.
     DEBUG_BREAK_SLOT_AT_POSITION,
+    DEBUG_BREAK_SLOT_AT_RETURN,
     DEBUG_BREAK_SLOT_AT_CALL,
     DEBUG_BREAK_SLOT_AT_CONSTRUCT_CALL,
 
@@ -385,6 +387,9 @@ class RelocInfo {
 
     // Encoded internal reference, used only on MIPS, MIPS64 and PPC.
     INTERNAL_REFERENCE_ENCODED,
+
+    // Continuation points for a generator yield.
+    GENERATOR_CONTINUATION,
 
     // Marks constant and veneer pools. Only used on ARM and ARM64.
     // They use a custom noncompact encoding.
@@ -439,9 +444,6 @@ class RelocInfo {
   static inline bool IsGCRelocMode(Mode mode) {
     return mode <= LAST_GCED_ENUM;
   }
-  static inline bool IsJSReturn(Mode mode) {
-    return mode == JS_RETURN;
-  }
   static inline bool IsComment(Mode mode) {
     return mode == COMMENT;
   }
@@ -470,11 +472,15 @@ class RelocInfo {
     return mode == INTERNAL_REFERENCE_ENCODED;
   }
   static inline bool IsDebugBreakSlot(Mode mode) {
-    return IsDebugBreakSlotAtPosition(mode) || IsDebugBreakSlotAtCall(mode) ||
+    return IsDebugBreakSlotAtPosition(mode) || IsDebugBreakSlotAtReturn(mode) ||
+           IsDebugBreakSlotAtCall(mode) ||
            IsDebugBreakSlotAtConstructCall(mode);
   }
   static inline bool IsDebugBreakSlotAtPosition(Mode mode) {
     return mode == DEBUG_BREAK_SLOT_AT_POSITION;
+  }
+  static inline bool IsDebugBreakSlotAtReturn(Mode mode) {
+    return mode == DEBUG_BREAK_SLOT_AT_RETURN;
   }
   static inline bool IsDebugBreakSlotAtCall(Mode mode) {
     return mode == DEBUG_BREAK_SLOT_AT_CALL;
@@ -491,6 +497,9 @@ class RelocInfo {
   static inline bool IsCodeAgeSequence(Mode mode) {
     return mode == CODE_AGE_SEQUENCE;
   }
+  static inline bool IsGeneratorContinuation(Mode mode) {
+    return mode == GENERATOR_CONTINUATION;
+  }
   static inline int ModeMask(Mode mode) { return 1 << mode; }
 
   // Accessors
@@ -501,10 +510,11 @@ class RelocInfo {
   Code* host() const { return host_; }
   void set_host(Code* host) { host_ = host; }
 
-  // Apply a relocation by delta bytes
-  INLINE(void apply(intptr_t delta,
-                    ICacheFlushMode icache_flush_mode =
-                        FLUSH_ICACHE_IF_NEEDED));
+  // Apply a relocation by delta bytes. When the code object is moved, PC
+  // relative addresses have to be updated as well as absolute addresses
+  // inside the code (internal references).
+  // Do not forget to flush the icache afterwards!
+  INLINE(void apply(intptr_t delta));
 
   // Is the pointer this relocation info refers to coded like a plain pointer
   // or is it strange in some way (e.g. relative or patched into a series of
@@ -590,11 +600,8 @@ class RelocInfo {
   // Read/modify the address of a call instruction. This is used to relocate
   // the break points where straight-line code is patched with a call
   // instruction.
-  INLINE(Address call_address());
-  INLINE(void set_call_address(Address target));
-  INLINE(Object* call_object());
-  INLINE(void set_call_object(Object* target));
-  INLINE(Object** call_object_address());
+  INLINE(Address debug_call_address());
+  INLINE(void set_debug_call_address(Address target));
 
   // Wipe out a relocation to a fixed value, used for making snapshots
   // reproducible.
@@ -634,9 +641,9 @@ class RelocInfo {
   static const int kDataMask =
       (1 << CODE_TARGET_WITH_ID) | kPositionMask | (1 << COMMENT);
   static const int kDebugBreakSlotMask =
-      1 << DEBUG_BREAK_SLOT_AT_POSITION | 1 << DEBUG_BREAK_SLOT_AT_CALL |
-      1 << DEBUG_BREAK_SLOT_AT_CONSTRUCT_CALL;
-  static const int kApplyMask;  // Modes affected by apply. Depends on arch.
+      1 << DEBUG_BREAK_SLOT_AT_POSITION | 1 << DEBUG_BREAK_SLOT_AT_RETURN |
+      1 << DEBUG_BREAK_SLOT_AT_CALL | 1 << DEBUG_BREAK_SLOT_AT_CONSTRUCT_CALL;
+  static const int kApplyMask;  // Modes affected by apply.  Depends on arch.
 
  private:
   // On ARM, note that pc_ is the address of the constant pool entry
@@ -798,7 +805,6 @@ class RelocIterator: public Malloced {
 // External function
 
 //----------------------------------------------------------------------------
-class IC_Utility;
 class SCTableReference;
 class Debug_Address;
 
@@ -867,8 +873,6 @@ class ExternalReference BASE_EMBEDDED {
   ExternalReference(Runtime::FunctionId id, Isolate* isolate);
 
   ExternalReference(const Runtime::Function* f, Isolate* isolate);
-
-  ExternalReference(const IC_Utility& ic_utility, Isolate* isolate);
 
   explicit ExternalReference(StatsCounter* counter);
 
@@ -984,9 +988,6 @@ class ExternalReference BASE_EMBEDDED {
 
   Address address() const { return reinterpret_cast<Address>(address_); }
 
-  // Function Debug::Break()
-  static ExternalReference debug_break(Isolate* isolate);
-
   // Used to check if single stepping is enabled in generated code.
   static ExternalReference debug_step_in_fp_address(Isolate* isolate);
 
@@ -1018,6 +1019,8 @@ class ExternalReference BASE_EMBEDDED {
   }
 
   static ExternalReference stress_deopt_count(Isolate* isolate);
+
+  static ExternalReference fixed_typed_array_base_data_offset();
 
  private:
   explicit ExternalReference(void* address)

@@ -5,8 +5,6 @@
 #ifndef V8_AST_H_
 #define V8_AST_H_
 
-#include "src/v8.h"
-
 #include "src/assembler.h"
 #include "src/ast-value-factory.h"
 #include "src/bailout-reason.h"
@@ -14,9 +12,9 @@
 #include "src/base/smart-pointers.h"
 #include "src/factory.h"
 #include "src/isolate.h"
-#include "src/jsregexp.h"
-#include "src/list-inl.h"
+#include "src/list.h"
 #include "src/modules.h"
+#include "src/regexp/jsregexp.h"
 #include "src/runtime/runtime.h"
 #include "src/small-pointer-list.h"
 #include "src/token.h"
@@ -90,7 +88,8 @@ namespace internal {
   V(ThisFunction)               \
   V(SuperPropertyReference)     \
   V(SuperCallReference)         \
-  V(CaseClause)
+  V(CaseClause)                 \
+  V(EmptyParentheses)
 
 #define AST_NODE_LIST(V)                        \
   DECLARATION_NODE_LIST(V)                      \
@@ -152,23 +151,27 @@ class FeedbackVectorRequirements {
 };
 
 
-class VariableICSlotPair final {
+class ICSlotCache {
  public:
-  VariableICSlotPair(Variable* variable, FeedbackVectorICSlot slot)
-      : variable_(variable), slot_(slot) {}
-  VariableICSlotPair()
-      : variable_(NULL), slot_(FeedbackVectorICSlot::Invalid()) {}
+  explicit ICSlotCache(Zone* zone)
+      : zone_(zone),
+        hash_map_(HashMap::PointersMatch, ZoneHashMap::kDefaultHashMapCapacity,
+                  ZoneAllocationPolicy(zone)) {}
 
-  Variable* variable() const { return variable_; }
-  FeedbackVectorICSlot slot() const { return slot_; }
+  void Put(Variable* variable, FeedbackVectorICSlot slot) {
+    ZoneHashMap::Entry* entry = hash_map_.LookupOrInsert(
+        variable, ComputePointerHash(variable), ZoneAllocationPolicy(zone_));
+    entry->value = reinterpret_cast<void*>(slot.ToInt());
+  }
+
+  ZoneHashMap::Entry* Get(Variable* variable) const {
+    return hash_map_.Lookup(variable, ComputePointerHash(variable));
+  }
 
  private:
-  Variable* variable_;
-  FeedbackVectorICSlot slot_;
+  Zone* zone_;
+  ZoneHashMap hash_map_;
 };
-
-
-typedef List<VariableICSlotPair> ICSlotCache;
 
 
 class AstProperties final BASE_EMBEDDED {
@@ -339,6 +342,7 @@ class Expression : public AstNode {
     kTest
   };
 
+  // True iff the expression is a valid reference expression.
   virtual bool IsValidReferenceExpression() const { return false; }
 
   // Helpers for ToBoolean conversion.
@@ -361,6 +365,9 @@ class Expression : public AstNode {
 
   // True if we can prove that the expression is the undefined literal.
   bool IsUndefinedLiteral(Isolate* isolate) const;
+
+  // True iff the expression is a valid target for an assignment.
+  bool IsValidReferenceExpressionOrThis() const;
 
   // Expression type bounds
   Bounds bounds() const { return bounds_; }
@@ -399,7 +406,7 @@ class Expression : public AstNode {
   Expression(Zone* zone, int pos)
       : AstNode(pos),
         base_id_(BailoutId::None().ToInt()),
-        bounds_(Bounds::Unbounded(zone)),
+        bounds_(Bounds::Unbounded()),
         bit_field_(0) {}
   static int parent_num_ids() { return 0; }
   void set_to_boolean_types(uint16_t types) {
@@ -1612,10 +1619,12 @@ class ArrayLiteral final : public MaterializedLiteral {
   };
 
  protected:
-  ArrayLiteral(Zone* zone, ZoneList<Expression*>* values, int literal_index,
-               bool is_strong, int pos)
+  ArrayLiteral(Zone* zone, ZoneList<Expression*>* values,
+               int first_spread_index, int literal_index, bool is_strong,
+               int pos)
       : MaterializedLiteral(zone, literal_index, is_strong, pos),
-        values_(values) {}
+        values_(values),
+        first_spread_index_(first_spread_index) {}
   static int parent_num_ids() { return MaterializedLiteral::num_ids(); }
 
  private:
@@ -1623,6 +1632,7 @@ class ArrayLiteral final : public MaterializedLiteral {
 
   Handle<FixedArray> constant_elements_;
   ZoneList<Expression*>* values_;
+  int first_spread_index_;
 };
 
 
@@ -1630,7 +1640,9 @@ class VariableProxy final : public Expression {
  public:
   DECLARE_NODE_TYPE(VariableProxy)
 
-  bool IsValidReferenceExpression() const override { return !is_this(); }
+  bool IsValidReferenceExpression() const override {
+    return !is_this() && !is_new_target();
+  }
 
   bool IsArguments() const { return is_resolved() && var()->is_arguments(); }
 
@@ -1661,6 +1673,11 @@ class VariableProxy final : public Expression {
     bit_field_ = IsResolvedField::update(bit_field_, true);
   }
 
+  bool is_new_target() const { return IsNewTargetField::decode(bit_field_); }
+  void set_is_new_target() {
+    bit_field_ = IsNewTargetField::update(bit_field_, true);
+  }
+
   int end_position() const { return end_position_; }
 
   // Bind this proxy to the variable var.
@@ -1677,7 +1694,6 @@ class VariableProxy final : public Expression {
                               ICSlotCache* cache) override;
   Code::Kind FeedbackICSlotKind(int index) override { return Code::LOAD_IC; }
   FeedbackVectorICSlot VariableFeedbackSlot() {
-    DCHECK(!UsesVariableFeedbackSlot() || !variable_feedback_slot_.IsInvalid());
     return variable_feedback_slot_;
   }
 
@@ -1697,6 +1713,7 @@ class VariableProxy final : public Expression {
   class IsThisField : public BitField8<bool, 0, 1> {};
   class IsAssignedField : public BitField8<bool, 1, 1> {};
   class IsResolvedField : public BitField8<bool, 2, 1> {};
+  class IsNewTargetField : public BitField8<bool, 3, 1> {};
 
   // Start with 16-bit (or smaller) field, which should get packed together
   // with Expression's trailing 16-bit field.
@@ -1785,7 +1802,6 @@ class Property final : public Expression {
   }
 
   FeedbackVectorICSlot PropertyFeedbackSlot() const {
-    DCHECK(!property_feedback_slot_.IsInvalid());
     return property_feedback_slot_;
   }
 
@@ -2016,51 +2032,45 @@ class CallRuntime final : public Expression {
  public:
   DECLARE_NODE_TYPE(CallRuntime)
 
-  Handle<String> name() const { return raw_name_->string(); }
-  const AstRawString* raw_name() const { return raw_name_; }
-  const Runtime::Function* function() const { return function_; }
   ZoneList<Expression*>* arguments() const { return arguments_; }
   bool is_jsruntime() const { return function_ == NULL; }
 
-  // Type feedback information.
-  bool HasCallRuntimeFeedbackSlot() const { return is_jsruntime(); }
-  virtual FeedbackVectorRequirements ComputeFeedbackRequirements(
-      Isolate* isolate, const ICSlotCache* cache) override {
-    return FeedbackVectorRequirements(0, HasCallRuntimeFeedbackSlot() ? 1 : 0);
+  int context_index() const {
+    DCHECK(is_jsruntime());
+    return context_index_;
   }
-  void SetFirstFeedbackICSlot(FeedbackVectorICSlot slot,
-                              ICSlotCache* cache) override {
-    callruntime_feedback_slot_ = slot;
-  }
-  Code::Kind FeedbackICSlotKind(int index) override { return Code::LOAD_IC; }
-
-  FeedbackVectorICSlot CallRuntimeFeedbackSlot() {
-    DCHECK(!HasCallRuntimeFeedbackSlot() ||
-           !callruntime_feedback_slot_.IsInvalid());
-    return callruntime_feedback_slot_;
+  const Runtime::Function* function() const {
+    DCHECK(!is_jsruntime());
+    return function_;
   }
 
   static int num_ids() { return parent_num_ids() + 1; }
   BailoutId CallId() { return BailoutId(local_id(0)); }
 
+  const char* debug_name() {
+    return is_jsruntime() ? "(context function)" : function_->name;
+  }
+
  protected:
-  CallRuntime(Zone* zone, const AstRawString* name,
-              const Runtime::Function* function,
+  CallRuntime(Zone* zone, const Runtime::Function* function,
               ZoneList<Expression*>* arguments, int pos)
+      : Expression(zone, pos), function_(function), arguments_(arguments) {}
+
+  CallRuntime(Zone* zone, int context_index, ZoneList<Expression*>* arguments,
+              int pos)
       : Expression(zone, pos),
-        raw_name_(name),
-        function_(function),
-        arguments_(arguments),
-        callruntime_feedback_slot_(FeedbackVectorICSlot::Invalid()) {}
+        function_(NULL),
+        context_index_(context_index),
+        arguments_(arguments) {}
+
   static int parent_num_ids() { return Expression::num_ids(); }
 
  private:
   int local_id(int n) const { return base_id() + parent_num_ids() + n; }
 
-  const AstRawString* raw_name_;
   const Runtime::Function* function_;
+  int context_index_;
   ZoneList<Expression*>* arguments_;
-  FeedbackVectorICSlot callruntime_feedback_slot_;
 };
 
 
@@ -2218,8 +2228,8 @@ class CountOperation final : public Expression {
 
   class IsPrefixField : public BitField16<bool, 0, 1> {};
   class KeyTypeField : public BitField16<IcCheckType, 1, 1> {};
-  class StoreModeField : public BitField16<KeyedAccessStoreMode, 2, 4> {};
-  class TokenField : public BitField16<Token::Value, 6, 8> {};
+  class StoreModeField : public BitField16<KeyedAccessStoreMode, 2, 3> {};
+  class TokenField : public BitField16<Token::Value, 5, 8> {};
 
   // Starts with 16-bit field, which should get packed together with
   // Expression's trailing 16-bit field.
@@ -2389,8 +2399,8 @@ class Assignment final : public Expression {
 
   class IsUninitializedField : public BitField16<bool, 0, 1> {};
   class KeyTypeField : public BitField16<IcCheckType, 1, 1> {};
-  class StoreModeField : public BitField16<KeyedAccessStoreMode, 2, 4> {};
-  class TokenField : public BitField16<Token::Value, 6, 8> {};
+  class StoreModeField : public BitField16<KeyedAccessStoreMode, 2, 3> {};
+  class TokenField : public BitField16<Token::Value, 5, 8> {};
 
   // Starts with 16-bit field, which should get packed together with
   // Expression's trailing 16-bit field.
@@ -2822,7 +2832,7 @@ class SuperCallReference final : public Expression {
         new_target_var_(new_target_var),
         this_function_var_(this_function_var) {
     DCHECK(this_var->is_this());
-    DCHECK(new_target_var->raw_name()->IsOneByteEqualTo("new.target"));
+    DCHECK(new_target_var->raw_name()->IsOneByteEqualTo(".new.target"));
     DCHECK(this_function_var->raw_name()->IsOneByteEqualTo(".this_function"));
   }
 
@@ -2830,6 +2840,17 @@ class SuperCallReference final : public Expression {
   VariableProxy* this_var_;
   VariableProxy* new_target_var_;
   VariableProxy* this_function_var_;
+};
+
+
+// This class is produced when parsing the () in arrow functions without any
+// arguments and is not actually a valid expression.
+class EmptyParentheses final : public Expression {
+ public:
+  DECLARE_NODE_TYPE(EmptyParentheses)
+
+ private:
+  EmptyParentheses(Zone* zone, int pos) : Expression(zone, pos) {}
 };
 
 
@@ -3452,8 +3473,15 @@ class AstNodeFactory final BASE_EMBEDDED {
                                 int literal_index,
                                 bool is_strong,
                                 int pos) {
-    return new (zone_) ArrayLiteral(zone_, values, literal_index, is_strong,
-                                    pos);
+    return new (zone_)
+        ArrayLiteral(zone_, values, -1, literal_index, is_strong, pos);
+  }
+
+  ArrayLiteral* NewArrayLiteral(ZoneList<Expression*>* values,
+                                int first_spread_index, int literal_index,
+                                bool is_strong, int pos) {
+    return new (zone_) ArrayLiteral(zone_, values, first_spread_index,
+                                    literal_index, is_strong, pos);
   }
 
   VariableProxy* NewVariableProxy(Variable* var,
@@ -3487,11 +3515,20 @@ class AstNodeFactory final BASE_EMBEDDED {
     return new (zone_) CallNew(zone_, expression, arguments, pos);
   }
 
-  CallRuntime* NewCallRuntime(const AstRawString* name,
-                              const Runtime::Function* function,
-                              ZoneList<Expression*>* arguments,
-                              int pos) {
-    return new (zone_) CallRuntime(zone_, name, function, arguments, pos);
+  CallRuntime* NewCallRuntime(Runtime::FunctionId id,
+                              ZoneList<Expression*>* arguments, int pos) {
+    return new (zone_)
+        CallRuntime(zone_, Runtime::FunctionForId(id), arguments, pos);
+  }
+
+  CallRuntime* NewCallRuntime(const Runtime::Function* function,
+                              ZoneList<Expression*>* arguments, int pos) {
+    return new (zone_) CallRuntime(zone_, function, arguments, pos);
+  }
+
+  CallRuntime* NewCallRuntime(int context_index,
+                              ZoneList<Expression*>* arguments, int pos) {
+    return new (zone_) CallRuntime(zone_, context_index, arguments, pos);
   }
 
   UnaryOperation* NewUnaryOperation(Token::Value op,
@@ -3609,6 +3646,10 @@ class AstNodeFactory final BASE_EMBEDDED {
                                             int pos) {
     return new (zone_) SuperCallReference(zone_, this_var, new_target_var,
                                           this_function_var, pos);
+  }
+
+  EmptyParentheses* NewEmptyParentheses(int pos) {
+    return new (zone_) EmptyParentheses(zone_, pos);
   }
 
  private:

@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
-
 #if V8_TARGET_ARCH_ARM64
 
 #include "src/interface-descriptors.h"
@@ -33,33 +31,23 @@ const Register VectorStoreICTrampolineDescriptor::SlotRegister() { return x4; }
 const Register VectorStoreICDescriptor::VectorRegister() { return x3; }
 
 
+const Register VectorStoreTransitionDescriptor::SlotRegister() { return x4; }
+const Register VectorStoreTransitionDescriptor::VectorRegister() { return x3; }
+const Register VectorStoreTransitionDescriptor::MapRegister() { return x5; }
+
+
 const Register StoreTransitionDescriptor::MapRegister() { return x3; }
 
 
-const Register LoadGlobalViaContextDescriptor::DepthRegister() { return x1; }
 const Register LoadGlobalViaContextDescriptor::SlotRegister() { return x2; }
-const Register LoadGlobalViaContextDescriptor::NameRegister() { return x3; }
 
 
-const Register StoreGlobalViaContextDescriptor::DepthRegister() { return x1; }
 const Register StoreGlobalViaContextDescriptor::SlotRegister() { return x2; }
-const Register StoreGlobalViaContextDescriptor::NameRegister() { return x3; }
 const Register StoreGlobalViaContextDescriptor::ValueRegister() { return x0; }
 
 
-const Register ElementTransitionAndStoreDescriptor::MapRegister() { return x3; }
-
-
-const Register InstanceofDescriptor::left() {
-  // Object to check (instanceof lhs).
-  return x11;
-}
-
-
-const Register InstanceofDescriptor::right() {
-  // Constructor function (instanceof rhs).
-  return x10;
-}
+const Register InstanceOfDescriptor::LeftRegister() { return x1; }
+const Register InstanceOfDescriptor::RightRegister() { return x0; }
 
 
 const Register ArgumentsAccessReadDescriptor::index() { return x1; }
@@ -77,6 +65,14 @@ const Register MathPowIntegerDescriptor::exponent() { return x12; }
 
 const Register GrowArrayElementsDescriptor::ObjectRegister() { return x0; }
 const Register GrowArrayElementsDescriptor::KeyRegister() { return x3; }
+
+
+void VectorStoreTransitionDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  Register registers[] = {ReceiverRegister(), NameRegister(),   ValueRegister(),
+                          SlotRegister(),     VectorRegister(), MapRegister()};
+  data->InitializePlatformSpecific(arraysize(registers), registers);
+}
 
 
 void FastNewClosureDescriptor::InitializePlatformSpecific(
@@ -101,6 +97,14 @@ void ToNumberDescriptor::InitializePlatformSpecific(
   Register registers[] = {x0};
   data->InitializePlatformSpecific(arraysize(registers), registers);
 }
+
+
+// static
+const Register ToStringDescriptor::ReceiverRegister() { return x0; }
+
+
+// static
+const Register ToObjectDescriptor::ReceiverRegister() { return x0; }
 
 
 void NumberToStringDescriptor::InitializePlatformSpecific(
@@ -192,10 +196,11 @@ void CallConstructDescriptor::InitializePlatformSpecific(
   // x0 : number of arguments
   // x1 : the function to call
   // x2 : feedback vector
-  // x3 : slot in feedback vector (smi) (if r2 is not the megamorphic symbol)
+  // x3 : slot in feedback vector (Smi, for RecordCallTarget)
+  // x4 : original constructor (for IsSuperConstructorCall)
   // TODO(turbofan): So far we don't gather type feedback and hence skip the
   // slot parameter, but ArrayConstructStub needs the vector to be undefined.
-  Register registers[] = {x0, x1, x2};
+  Register registers[] = {x0, x1, x4, x2};
   data->InitializePlatformSpecific(arraysize(registers), registers);
 }
 

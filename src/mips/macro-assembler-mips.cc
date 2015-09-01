@@ -4,8 +4,6 @@
 
 #include <limits.h>  // For LONG_MIN, LONG_MAX.
 
-#include "src/v8.h"
-
 #if V8_TARGET_ARCH_MIPS
 
 #include "src/base/bits.h"
@@ -13,7 +11,7 @@
 #include "src/bootstrapper.h"
 #include "src/codegen.h"
 #include "src/cpu-profiler.h"
-#include "src/debug.h"
+#include "src/debug/debug.h"
 #include "src/runtime/runtime.h"
 
 namespace v8 {
@@ -164,6 +162,9 @@ void MacroAssembler::InNewSpace(Register object,
 }
 
 
+// Clobbers object, dst, value, and ra, if (ra_status == kRAHasBeenSaved)
+// The register 'object' contains a heap object pointer.  The heap object
+// tag is shifted away.
 void MacroAssembler::RecordWriteField(
     Register object,
     int offset,
@@ -217,8 +218,7 @@ void MacroAssembler::RecordWriteField(
 }
 
 
-// Will clobber 4 registers: object, map, dst, ip.  The
-// register 'object' contains a heap object pointer.
+// Clobbers object, dst, map, and ra, if (ra_status == kRAHasBeenSaved)
 void MacroAssembler::RecordWriteForMap(Register object,
                                        Register map,
                                        Register dst,
@@ -292,8 +292,8 @@ void MacroAssembler::RecordWriteForMap(Register object,
 }
 
 
-// Will clobber 4 registers: object, address, scratch, ip.  The
-// register 'object' contains a heap object pointer.  The heap object
+// Clobbers object, address, value, and ra, if (ra_status == kRAHasBeenSaved)
+// The register 'object' contains a heap object pointer.  The heap object
 // tag is shifted away.
 void MacroAssembler::RecordWrite(
     Register object,
@@ -3287,7 +3287,8 @@ void MacroAssembler::Push(Handle<Object> handle) {
 
 void MacroAssembler::DebugBreak() {
   PrepareCEntryArgs(0);
-  PrepareCEntryFunction(ExternalReference(Runtime::kDebugBreak, isolate()));
+  PrepareCEntryFunction(
+      ExternalReference(Runtime::kHandleDebuggerStatement, isolate()));
   CEntryStub ces(isolate(), 1);
   DCHECK(AllowThisStubCall(&ces));
   Call(ces.GetCode(), RelocInfo::DEBUGGER_STATEMENT);
@@ -4269,34 +4270,8 @@ void MacroAssembler::GetMapConstructor(Register result, Register map,
 }
 
 
-void MacroAssembler::TryGetFunctionPrototype(Register function,
-                                             Register result,
-                                             Register scratch,
-                                             Label* miss,
-                                             bool miss_on_bound_function) {
-  Label non_instance;
-  if (miss_on_bound_function) {
-    // Check that the receiver isn't a smi.
-    JumpIfSmi(function, miss);
-
-    // Check that the function really is a function.  Load map into result reg.
-    GetObjectType(function, result, scratch);
-    Branch(miss, ne, scratch, Operand(JS_FUNCTION_TYPE));
-
-    lw(scratch,
-       FieldMemOperand(function, JSFunction::kSharedFunctionInfoOffset));
-    lw(scratch,
-       FieldMemOperand(scratch, SharedFunctionInfo::kCompilerHintsOffset));
-    And(scratch, scratch,
-        Operand(Smi::FromInt(1 << SharedFunctionInfo::kBoundFunction)));
-    Branch(miss, ne, scratch, Operand(zero_reg));
-
-    // Make sure that the function has an instance prototype.
-    lbu(scratch, FieldMemOperand(result, Map::kBitFieldOffset));
-    And(scratch, scratch, Operand(1 << Map::kHasNonInstancePrototype));
-    Branch(&non_instance, ne, scratch, Operand(zero_reg));
-  }
-
+void MacroAssembler::TryGetFunctionPrototype(Register function, Register result,
+                                             Register scratch, Label* miss) {
   // Get the prototype or initial map from the function.
   lw(result,
      FieldMemOperand(function, JSFunction::kPrototypeOrInitialMapOffset));
@@ -4314,15 +4289,6 @@ void MacroAssembler::TryGetFunctionPrototype(Register function,
 
   // Get the prototype from the initial map.
   lw(result, FieldMemOperand(result, Map::kPrototypeOffset));
-
-  if (miss_on_bound_function) {
-    jmp(&done);
-
-    // Non-instance prototype: Fetch prototype from constructor field
-    // in initial map.
-    bind(&non_instance);
-    GetMapConstructor(result, result, scratch, scratch);
-  }
 
   // All done.
   bind(&done);
@@ -4559,9 +4525,9 @@ void MacroAssembler::SubuAndCheckForOverflow(Register dst, Register left,
 }
 
 
-void MacroAssembler::CallRuntime(const Runtime::Function* f,
-                                 int num_arguments,
-                                 SaveFPRegsMode save_doubles) {
+void MacroAssembler::CallRuntime(const Runtime::Function* f, int num_arguments,
+                                 SaveFPRegsMode save_doubles,
+                                 BranchDelaySlot bd) {
   // All parameters are on the stack. v0 has the return value after call.
 
   // If the expected number of arguments of the runtime function is
@@ -4576,7 +4542,7 @@ void MacroAssembler::CallRuntime(const Runtime::Function* f,
   PrepareCEntryArgs(num_arguments);
   PrepareCEntryFunction(ExternalReference(f, isolate()));
   CEntryStub stub(isolate(), 1, save_doubles);
-  CallStub(&stub);
+  CallStub(&stub, TypeFeedbackId::None(), al, zero_reg, Operand(zero_reg), bd);
 }
 
 
@@ -4625,13 +4591,12 @@ void MacroAssembler::JumpToExternalReference(const ExternalReference& builtin,
 }
 
 
-void MacroAssembler::InvokeBuiltin(Builtins::JavaScript id,
-                                   InvokeFlag flag,
+void MacroAssembler::InvokeBuiltin(int native_context_index, InvokeFlag flag,
                                    const CallWrapper& call_wrapper) {
   // You can't call a builtin without a valid frame.
   DCHECK(flag == JUMP_FUNCTION || has_frame());
 
-  GetBuiltinEntry(t9, id);
+  GetBuiltinEntry(t9, native_context_index);
   if (flag == CALL_FUNCTION) {
     call_wrapper.BeforeCall(CallSize(t9));
     Call(t9);
@@ -4644,19 +4609,19 @@ void MacroAssembler::InvokeBuiltin(Builtins::JavaScript id,
 
 
 void MacroAssembler::GetBuiltinFunction(Register target,
-                                        Builtins::JavaScript id) {
+                                        int native_context_index) {
   // Load the builtins object into target register.
   lw(target, MemOperand(cp, Context::SlotOffset(Context::GLOBAL_OBJECT_INDEX)));
-  lw(target, FieldMemOperand(target, GlobalObject::kBuiltinsOffset));
+  lw(target, FieldMemOperand(target, GlobalObject::kNativeContextOffset));
   // Load the JavaScript builtin function from the builtins object.
-  lw(target, FieldMemOperand(target,
-                          JSBuiltinsObject::OffsetOfFunctionWithId(id)));
+  lw(target, ContextOperand(target, native_context_index));
 }
 
 
-void MacroAssembler::GetBuiltinEntry(Register target, Builtins::JavaScript id) {
+void MacroAssembler::GetBuiltinEntry(Register target,
+                                     int native_context_index) {
   DCHECK(!target.is(a1));
-  GetBuiltinFunction(a1, id);
+  GetBuiltinFunction(a1, native_context_index);
   // Load the code entry point from the builtins object.
   lw(target, FieldMemOperand(a1, JSFunction::kCodeEntryOffset));
 }
@@ -5553,65 +5518,6 @@ void MacroAssembler::CallCFunctionHelper(Register function,
 
 
 #undef BRANCH_ARGS_CHECK
-
-
-void MacroAssembler::PatchRelocatedValue(Register li_location,
-                                         Register scratch,
-                                         Register new_value) {
-  lw(scratch, MemOperand(li_location));
-  // At this point scratch is a lui(at, ...) instruction.
-  if (emit_debug_code()) {
-    And(scratch, scratch, kOpcodeMask);
-    Check(eq, kTheInstructionToPatchShouldBeALui,
-        scratch, Operand(LUI));
-    lw(scratch, MemOperand(li_location));
-  }
-  srl(t9, new_value, kImm16Bits);
-  Ins(scratch, t9, 0, kImm16Bits);
-  sw(scratch, MemOperand(li_location));
-
-  lw(scratch, MemOperand(li_location, kInstrSize));
-  // scratch is now ori(at, ...).
-  if (emit_debug_code()) {
-    And(scratch, scratch, kOpcodeMask);
-    Check(eq, kTheInstructionToPatchShouldBeAnOri,
-        scratch, Operand(ORI));
-    lw(scratch, MemOperand(li_location, kInstrSize));
-  }
-  Ins(scratch, new_value, 0, kImm16Bits);
-  sw(scratch, MemOperand(li_location, kInstrSize));
-
-  // Update the I-cache so the new lui and ori can be executed.
-  FlushICache(li_location, 2);
-}
-
-void MacroAssembler::GetRelocatedValue(Register li_location,
-                                       Register value,
-                                       Register scratch) {
-  lw(value, MemOperand(li_location));
-  if (emit_debug_code()) {
-    And(value, value, kOpcodeMask);
-    Check(eq, kTheInstructionShouldBeALui,
-        value, Operand(LUI));
-    lw(value, MemOperand(li_location));
-  }
-
-  // value now holds a lui instruction. Extract the immediate.
-  sll(value, value, kImm16Bits);
-
-  lw(scratch, MemOperand(li_location, kInstrSize));
-  if (emit_debug_code()) {
-    And(scratch, scratch, kOpcodeMask);
-    Check(eq, kTheInstructionShouldBeAnOri,
-        scratch, Operand(ORI));
-    lw(scratch, MemOperand(li_location, kInstrSize));
-  }
-  // "scratch" now holds an ori instruction. Extract the immediate.
-  andi(scratch, scratch, kImm16Mask);
-
-  // Merge the results.
-  or_(value, value, scratch);
-}
 
 
 void MacroAssembler::CheckPageFlag(

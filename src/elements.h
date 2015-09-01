@@ -38,6 +38,11 @@ class ElementsAccessor {
     return HasElement(holder, index, handle(holder->elements()));
   }
 
+  // Returns true if the backing store is compact in the given range
+  virtual bool IsPacked(Handle<JSObject> holder,
+                        Handle<FixedArrayBase> backing_store, uint32_t start,
+                        uint32_t end) = 0;
+
   virtual Handle<Object> Get(Handle<FixedArrayBase> backing_store,
                              uint32_t entry) = 0;
 
@@ -59,6 +64,9 @@ class ElementsAccessor {
   // destination array, padding any remaining uninitialized elements in the
   // destination array with the hole.
   static const int kCopyToEndAndInitializeToHole = -2;
+
+  static const int kDirectionForward = 1;
+  static const int kDirectionReverse = -1;
 
   // Copy elements from one backing store to another. Typically, callers specify
   // the source JSObject or JSArray in source_holder. If the holder's backing
@@ -112,13 +120,33 @@ class ElementsAccessor {
 
   virtual void Set(FixedArrayBase* backing_store, uint32_t entry,
                    Object* value) = 0;
+
   virtual void Reconfigure(Handle<JSObject> object,
                            Handle<FixedArrayBase> backing_store, uint32_t entry,
                            Handle<Object> value,
                            PropertyAttributes attributes) = 0;
+
   virtual void Add(Handle<JSObject> object, uint32_t index,
                    Handle<Object> value, PropertyAttributes attributes,
                    uint32_t new_capacity) = 0;
+
+  // TODO(cbruni): Consider passing Arguments* instead of Object** depending on
+  // the requirements of future callers.
+  virtual uint32_t Push(Handle<JSArray> receiver,
+                        Handle<FixedArrayBase> backing_store, Object** objects,
+                        uint32_t start, int direction) = 0;
+
+  virtual Handle<JSArray> Slice(Handle<JSObject> receiver,
+                                Handle<FixedArrayBase> backing_store,
+                                uint32_t start, uint32_t end) = 0;
+
+  virtual Handle<JSArray> Splice(Handle<JSArray> receiver,
+                                 Handle<FixedArrayBase> backing_store,
+                                 uint32_t start, uint32_t delete_count,
+                                 Arguments args, uint32_t add_count) = 0;
+
+  virtual Handle<Object> Pop(Handle<JSArray> receiver,
+                             Handle<FixedArrayBase> backing_store) = 0;
 
  protected:
   friend class LookupIterator;

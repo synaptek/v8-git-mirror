@@ -7,8 +7,6 @@
 #include <cstdarg>
 #include <sstream>
 
-#include "src/v8.h"
-
 #include "src/bailout-reason.h"
 #include "src/base/platform/platform.h"
 #include "src/bootstrapper.h"
@@ -287,6 +285,12 @@ void PerfBasicLogger::LogRecordedBuffer(Code* code,
                                        const char* name,
                                        int length) {
   DCHECK(code->instruction_start() == code->address() + Code::kHeaderSize);
+
+  if (FLAG_perf_basic_prof_only_functions &&
+      (code->kind() != Code::FUNCTION &&
+       code->kind() != Code::OPTIMIZED_FUNCTION)) {
+    return;
+  }
 
   base::OS::FPrint(perf_output_handle_, "%llx %x %.*s\n",
                    reinterpret_cast<uint64_t>(code->instruction_start()),
@@ -1602,8 +1606,7 @@ void Logger::LogCodeObject(Object* object) {
     case Code::COMPARE_NIL_IC:   // fall through
     case Code::TO_BOOLEAN_IC:  // fall through
     case Code::STUB:
-      description =
-          CodeStub::MajorName(CodeStub::GetMajorKey(code_object), true);
+      description = CodeStub::MajorName(CodeStub::GetMajorKey(code_object));
       if (description == NULL)
         description = "A stub from the snapshot";
       tag = Logger::STUB_TAG;
@@ -1639,6 +1642,10 @@ void Logger::LogCodeObject(Object* object) {
     case Code::KEYED_STORE_IC:
       description = "A keyed store IC from the snapshot";
       tag = Logger::KEYED_STORE_IC_TAG;
+      break;
+    case Code::PLACEHOLDER:
+      description = "A placeholder for linking later code";
+      tag = Logger::STUB_TAG;
       break;
     case Code::NUMBER_OF_KINDS:
       break;

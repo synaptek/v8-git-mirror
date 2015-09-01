@@ -5,8 +5,6 @@
 #include <assert.h>  // For assert
 #include <limits.h>  // For LONG_MIN, LONG_MAX.
 
-#include "src/v8.h"
-
 #if V8_TARGET_ARCH_PPC
 
 #include "src/base/bits.h"
@@ -14,7 +12,7 @@
 #include "src/bootstrapper.h"
 #include "src/codegen.h"
 #include "src/cpu-profiler.h"
-#include "src/debug.h"
+#include "src/debug/debug.h"
 #include "src/runtime/runtime.h"
 
 namespace v8 {
@@ -176,23 +174,10 @@ void MacroAssembler::Call(Handle<Code> code, RelocInfo::Mode rmode,
 }
 
 
-void MacroAssembler::Ret(Condition cond) {
-  DCHECK(cond == al);
-  blr();
-}
-
-
-void MacroAssembler::Drop(int count, Condition cond) {
-  DCHECK(cond == al);
+void MacroAssembler::Drop(int count) {
   if (count > 0) {
     Add(sp, sp, count * kPointerSize, r0);
   }
-}
-
-
-void MacroAssembler::Ret(int drop, Condition cond) {
-  Drop(drop, cond);
-  Ret(cond);
 }
 
 
@@ -237,30 +222,59 @@ void MacroAssembler::Move(DoubleRegister dst, DoubleRegister src) {
 }
 
 
-void MacroAssembler::MultiPush(RegList regs) {
+void MacroAssembler::MultiPush(RegList regs, Register location) {
   int16_t num_to_push = NumberOfBitsSet(regs);
   int16_t stack_offset = num_to_push * kPointerSize;
 
-  subi(sp, sp, Operand(stack_offset));
-  for (int16_t i = kNumRegisters - 1; i >= 0; i--) {
+  subi(location, location, Operand(stack_offset));
+  for (int16_t i = Register::kNumRegisters - 1; i >= 0; i--) {
     if ((regs & (1 << i)) != 0) {
       stack_offset -= kPointerSize;
-      StoreP(ToRegister(i), MemOperand(sp, stack_offset));
+      StoreP(ToRegister(i), MemOperand(location, stack_offset));
     }
   }
 }
 
 
-void MacroAssembler::MultiPop(RegList regs) {
+void MacroAssembler::MultiPop(RegList regs, Register location) {
   int16_t stack_offset = 0;
 
-  for (int16_t i = 0; i < kNumRegisters; i++) {
+  for (int16_t i = 0; i < Register::kNumRegisters; i++) {
     if ((regs & (1 << i)) != 0) {
-      LoadP(ToRegister(i), MemOperand(sp, stack_offset));
+      LoadP(ToRegister(i), MemOperand(location, stack_offset));
       stack_offset += kPointerSize;
     }
   }
-  addi(sp, sp, Operand(stack_offset));
+  addi(location, location, Operand(stack_offset));
+}
+
+
+void MacroAssembler::MultiPushDoubles(RegList dregs, Register location) {
+  int16_t num_to_push = NumberOfBitsSet(dregs);
+  int16_t stack_offset = num_to_push * kDoubleSize;
+
+  subi(location, location, Operand(stack_offset));
+  for (int16_t i = DoubleRegister::kNumRegisters - 1; i >= 0; i--) {
+    if ((dregs & (1 << i)) != 0) {
+      DoubleRegister dreg = DoubleRegister::from_code(i);
+      stack_offset -= kDoubleSize;
+      stfd(dreg, MemOperand(location, stack_offset));
+    }
+  }
+}
+
+
+void MacroAssembler::MultiPopDoubles(RegList dregs, Register location) {
+  int16_t stack_offset = 0;
+
+  for (int16_t i = 0; i < DoubleRegister::kNumRegisters; i++) {
+    if ((dregs & (1 << i)) != 0) {
+      DoubleRegister dreg = DoubleRegister::from_code(i);
+      lfd(dreg, MemOperand(location, stack_offset));
+      stack_offset += kDoubleSize;
+    }
+  }
+  addi(location, location, Operand(stack_offset));
 }
 
 
@@ -497,7 +511,7 @@ void MacroAssembler::RememberedSetHelper(Register object,  // For debug tests.
     beq(&done, cr0);
   } else {
     DCHECK(and_then == kReturnAtEnd);
-    beq(&done, cr0);
+    Ret(eq, cr0);
   }
   mflr(r0);
   push(r0);
@@ -838,7 +852,7 @@ void MacroAssembler::EnterExitFrame(bool save_doubles, int stack_space) {
 
   // Optionally save all volatile double registers.
   if (save_doubles) {
-    SaveFPRegs(sp, 0, DoubleRegister::kNumVolatileRegisters);
+    MultiPushDoubles(kCallerSavedDoubles);
     // Note that d0 will be accessible at
     //   fp - ExitFrameConstants::kFrameSize -
     //   kNumVolatileRegisters * kDoubleSize,
@@ -904,7 +918,7 @@ void MacroAssembler::LeaveExitFrame(bool save_doubles, Register argument_count,
     const int offset =
         (ExitFrameConstants::kFrameSize + kNumRegs * kDoubleSize);
     addi(r6, fp, Operand(-offset));
-    RestoreFPRegs(r6, 0, kNumRegs);
+    MultiPopDoubles(kCallerSavedDoubles, r6);
   }
 
   // Clear top frame.
@@ -1147,7 +1161,8 @@ void MacroAssembler::IsObjectNameType(Register object, Register scratch,
 
 void MacroAssembler::DebugBreak() {
   li(r3, Operand::Zero());
-  mov(r4, Operand(ExternalReference(Runtime::kDebugBreak, isolate())));
+  mov(r4,
+      Operand(ExternalReference(Runtime::kHandleDebuggerStatement, isolate())));
   CEntryStub ces(isolate(), 1);
   DCHECK(AllowThisStubCall(&ces));
   Call(ces.GetCode(), RelocInfo::DEBUGGER_STATEMENT);
@@ -1964,36 +1979,7 @@ void MacroAssembler::GetMapConstructor(Register result, Register map,
 
 
 void MacroAssembler::TryGetFunctionPrototype(Register function, Register result,
-                                             Register scratch, Label* miss,
-                                             bool miss_on_bound_function) {
-  Label non_instance;
-  if (miss_on_bound_function) {
-    // Check that the receiver isn't a smi.
-    JumpIfSmi(function, miss);
-
-    // Check that the function really is a function.  Load map into result reg.
-    CompareObjectType(function, result, scratch, JS_FUNCTION_TYPE);
-    bne(miss);
-
-    LoadP(scratch,
-          FieldMemOperand(function, JSFunction::kSharedFunctionInfoOffset));
-    lwz(scratch,
-        FieldMemOperand(scratch, SharedFunctionInfo::kCompilerHintsOffset));
-    TestBit(scratch,
-#if V8_TARGET_ARCH_PPC64
-            SharedFunctionInfo::kBoundFunction,
-#else
-            SharedFunctionInfo::kBoundFunction + kSmiTagSize,
-#endif
-            r0);
-    bne(miss, cr0);
-
-    // Make sure that the function has an instance prototype.
-    lbz(scratch, FieldMemOperand(result, Map::kBitFieldOffset));
-    andi(r0, scratch, Operand(1 << Map::kHasNonInstancePrototype));
-    bne(&non_instance, cr0);
-  }
-
+                                             Register scratch, Label* miss) {
   // Get the prototype or initial map from the function.
   LoadP(result,
         FieldMemOperand(function, JSFunction::kPrototypeOrInitialMapOffset));
@@ -2012,15 +1998,6 @@ void MacroAssembler::TryGetFunctionPrototype(Register function, Register result,
 
   // Get the prototype from the initial map.
   LoadP(result, FieldMemOperand(result, Map::kPrototypeOffset));
-
-  if (miss_on_bound_function) {
-    b(&done);
-
-    // Non-instance prototype: Fetch prototype from constructor field
-    // in initial map.
-    bind(&non_instance);
-    GetMapConstructor(result, result, scratch, ip);
-  }
 
   // All done.
   bind(&done);
@@ -2297,12 +2274,12 @@ void MacroAssembler::JumpToExternalReference(const ExternalReference& builtin) {
 }
 
 
-void MacroAssembler::InvokeBuiltin(Builtins::JavaScript id, InvokeFlag flag,
+void MacroAssembler::InvokeBuiltin(int native_context_index, InvokeFlag flag,
                                    const CallWrapper& call_wrapper) {
   // You can't call a builtin without a valid frame.
   DCHECK(flag == JUMP_FUNCTION || has_frame());
 
-  GetBuiltinEntry(ip, id);
+  GetBuiltinEntry(ip, native_context_index);
   if (flag == CALL_FUNCTION) {
     call_wrapper.BeforeCall(CallSize(ip));
     CallJSEntry(ip);
@@ -2315,21 +2292,20 @@ void MacroAssembler::InvokeBuiltin(Builtins::JavaScript id, InvokeFlag flag,
 
 
 void MacroAssembler::GetBuiltinFunction(Register target,
-                                        Builtins::JavaScript id) {
+                                        int native_context_index) {
   // Load the builtins object into target register.
   LoadP(target,
         MemOperand(cp, Context::SlotOffset(Context::GLOBAL_OBJECT_INDEX)));
-  LoadP(target, FieldMemOperand(target, GlobalObject::kBuiltinsOffset));
+  LoadP(target, FieldMemOperand(target, GlobalObject::kNativeContextOffset));
   // Load the JavaScript builtin function from the builtins object.
-  LoadP(target,
-        FieldMemOperand(target, JSBuiltinsObject::OffsetOfFunctionWithId(id)),
-        r0);
+  LoadP(target, ContextOperand(target, native_context_index), r0);
 }
 
 
-void MacroAssembler::GetBuiltinEntry(Register target, Builtins::JavaScript id) {
+void MacroAssembler::GetBuiltinEntry(Register target,
+                                     int native_context_index) {
   DCHECK(!target.is(r4));
-  GetBuiltinFunction(r4, id);
+  GetBuiltinFunction(r4, native_context_index);
   // Load the code entry point from the builtins object.
   LoadP(target, FieldMemOperand(r4, JSFunction::kCodeEntryOffset));
 }
@@ -2967,28 +2943,6 @@ void MacroAssembler::InitializeFieldsWithFiller(Register start_offset,
 }
 
 
-void MacroAssembler::SaveFPRegs(Register location, int first, int count) {
-  DCHECK(count > 0);
-  int cur = first;
-  subi(location, location, Operand(count * kDoubleSize));
-  for (int i = 0; i < count; i++) {
-    DoubleRegister reg = DoubleRegister::from_code(cur++);
-    stfd(reg, MemOperand(location, i * kDoubleSize));
-  }
-}
-
-
-void MacroAssembler::RestoreFPRegs(Register location, int first, int count) {
-  DCHECK(count > 0);
-  int cur = first + count - 1;
-  for (int i = count - 1; i >= 0; i--) {
-    DoubleRegister reg = DoubleRegister::from_code(cur--);
-    lfd(reg, MemOperand(location, i * kDoubleSize));
-  }
-  addi(location, location, Operand(count * kDoubleSize));
-}
-
-
 void MacroAssembler::JumpIfBothInstanceTypesAreNotSequentialOneByte(
     Register first, Register second, Register scratch1, Register scratch2,
     Label* failure) {
@@ -3248,175 +3202,6 @@ void MacroAssembler::DecodeConstantPoolOffset(Register result,
   add(result, r0, result);
 
   bind(&done);
-}
-
-
-void MacroAssembler::SetRelocatedValue(Register location, Register scratch,
-                                       Register new_value) {
-  lwz(scratch, MemOperand(location));
-
-  if (FLAG_enable_embedded_constant_pool) {
-    if (emit_debug_code()) {
-      // Check that the instruction sequence is a load from the constant pool
-      ExtractBitMask(scratch, scratch, 0x1f * B16);
-      cmpi(scratch, Operand(kConstantPoolRegister.code()));
-      Check(eq, kTheInstructionToPatchShouldBeALoadFromConstantPool);
-      // Scratch was clobbered. Restore it.
-      lwz(scratch, MemOperand(location));
-    }
-    DecodeConstantPoolOffset(scratch, location);
-    StorePX(new_value, MemOperand(kConstantPoolRegister, scratch));
-    return;
-  }
-
-  // This code assumes a FIXED_SEQUENCE for lis/ori
-
-  // At this point scratch is a lis instruction.
-  if (emit_debug_code()) {
-    And(scratch, scratch, Operand(kOpcodeMask | (0x1f * B16)));
-    Cmpi(scratch, Operand(ADDIS), r0);
-    Check(eq, kTheInstructionToPatchShouldBeALis);
-    lwz(scratch, MemOperand(location));
-  }
-
-// insert new high word into lis instruction
-#if V8_TARGET_ARCH_PPC64
-  srdi(ip, new_value, Operand(32));
-  rlwimi(scratch, ip, 16, 16, 31);
-#else
-  rlwimi(scratch, new_value, 16, 16, 31);
-#endif
-
-  stw(scratch, MemOperand(location));
-
-  lwz(scratch, MemOperand(location, kInstrSize));
-  // scratch is now ori.
-  if (emit_debug_code()) {
-    And(scratch, scratch, Operand(kOpcodeMask));
-    Cmpi(scratch, Operand(ORI), r0);
-    Check(eq, kTheInstructionShouldBeAnOri);
-    lwz(scratch, MemOperand(location, kInstrSize));
-  }
-
-// insert new low word into ori instruction
-#if V8_TARGET_ARCH_PPC64
-  rlwimi(scratch, ip, 0, 16, 31);
-#else
-  rlwimi(scratch, new_value, 0, 16, 31);
-#endif
-  stw(scratch, MemOperand(location, kInstrSize));
-
-#if V8_TARGET_ARCH_PPC64
-  if (emit_debug_code()) {
-    lwz(scratch, MemOperand(location, 2 * kInstrSize));
-    // scratch is now sldi.
-    And(scratch, scratch, Operand(kOpcodeMask | kExt5OpcodeMask));
-    Cmpi(scratch, Operand(EXT5 | RLDICR), r0);
-    Check(eq, kTheInstructionShouldBeASldi);
-  }
-
-  lwz(scratch, MemOperand(location, 3 * kInstrSize));
-  // scratch is now ori.
-  if (emit_debug_code()) {
-    And(scratch, scratch, Operand(kOpcodeMask));
-    Cmpi(scratch, Operand(ORIS), r0);
-    Check(eq, kTheInstructionShouldBeAnOris);
-    lwz(scratch, MemOperand(location, 3 * kInstrSize));
-  }
-
-  rlwimi(scratch, new_value, 16, 16, 31);
-  stw(scratch, MemOperand(location, 3 * kInstrSize));
-
-  lwz(scratch, MemOperand(location, 4 * kInstrSize));
-  // scratch is now ori.
-  if (emit_debug_code()) {
-    And(scratch, scratch, Operand(kOpcodeMask));
-    Cmpi(scratch, Operand(ORI), r0);
-    Check(eq, kTheInstructionShouldBeAnOri);
-    lwz(scratch, MemOperand(location, 4 * kInstrSize));
-  }
-  rlwimi(scratch, new_value, 0, 16, 31);
-  stw(scratch, MemOperand(location, 4 * kInstrSize));
-#endif
-
-// Update the I-cache so the new lis and addic can be executed.
-#if V8_TARGET_ARCH_PPC64
-  FlushICache(location, 5 * kInstrSize, scratch);
-#else
-  FlushICache(location, 2 * kInstrSize, scratch);
-#endif
-}
-
-
-void MacroAssembler::GetRelocatedValue(Register location, Register result,
-                                       Register scratch) {
-  lwz(result, MemOperand(location));
-
-  if (FLAG_enable_embedded_constant_pool) {
-    if (emit_debug_code()) {
-      // Check that the instruction sequence is a load from the constant pool
-      ExtractBitMask(result, result, 0x1f * B16);
-      cmpi(result, Operand(kConstantPoolRegister.code()));
-      Check(eq, kTheInstructionToPatchShouldBeALoadFromConstantPool);
-      lwz(result, MemOperand(location));
-    }
-    DecodeConstantPoolOffset(result, location);
-    LoadPX(result, MemOperand(kConstantPoolRegister, result));
-    return;
-  }
-
-  // This code assumes a FIXED_SEQUENCE for lis/ori
-  if (emit_debug_code()) {
-    And(result, result, Operand(kOpcodeMask | (0x1f * B16)));
-    Cmpi(result, Operand(ADDIS), r0);
-    Check(eq, kTheInstructionShouldBeALis);
-    lwz(result, MemOperand(location));
-  }
-
-  // result now holds a lis instruction. Extract the immediate.
-  slwi(result, result, Operand(16));
-
-  lwz(scratch, MemOperand(location, kInstrSize));
-  if (emit_debug_code()) {
-    And(scratch, scratch, Operand(kOpcodeMask));
-    Cmpi(scratch, Operand(ORI), r0);
-    Check(eq, kTheInstructionShouldBeAnOri);
-    lwz(scratch, MemOperand(location, kInstrSize));
-  }
-  // Copy the low 16bits from ori instruction into result
-  rlwimi(result, scratch, 0, 16, 31);
-
-#if V8_TARGET_ARCH_PPC64
-  if (emit_debug_code()) {
-    lwz(scratch, MemOperand(location, 2 * kInstrSize));
-    // scratch is now sldi.
-    And(scratch, scratch, Operand(kOpcodeMask | kExt5OpcodeMask));
-    Cmpi(scratch, Operand(EXT5 | RLDICR), r0);
-    Check(eq, kTheInstructionShouldBeASldi);
-  }
-
-  lwz(scratch, MemOperand(location, 3 * kInstrSize));
-  // scratch is now ori.
-  if (emit_debug_code()) {
-    And(scratch, scratch, Operand(kOpcodeMask));
-    Cmpi(scratch, Operand(ORIS), r0);
-    Check(eq, kTheInstructionShouldBeAnOris);
-    lwz(scratch, MemOperand(location, 3 * kInstrSize));
-  }
-  sldi(result, result, Operand(16));
-  rldimi(result, scratch, 0, 48);
-
-  lwz(scratch, MemOperand(location, 4 * kInstrSize));
-  // scratch is now ori.
-  if (emit_debug_code()) {
-    And(scratch, scratch, Operand(kOpcodeMask));
-    Cmpi(scratch, Operand(ORI), r0);
-    Check(eq, kTheInstructionShouldBeAnOri);
-    lwz(scratch, MemOperand(location, 4 * kInstrSize));
-  }
-  sldi(result, result, Operand(16));
-  rldimi(result, scratch, 0, 48);
-#endif
 }
 
 

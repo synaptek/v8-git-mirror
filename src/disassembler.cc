@@ -2,14 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
+#include "src/disassembler.h"
 
 #include "src/code-stubs.h"
 #include "src/codegen.h"
-#include "src/debug.h"
+#include "src/debug/debug.h"
 #include "src/deoptimizer.h"
 #include "src/disasm.h"
-#include "src/disassembler.h"
 #include "src/macro-assembler.h"
 #include "src/snapshot/serialize.h"
 #include "src/string-stream.h"
@@ -215,7 +214,7 @@ static int DecodeIt(Isolate* isolate, std::ostream* os,
           CodeStub::Major major_key = CodeStub::GetMajorKey(code);
           DCHECK(major_key == CodeStub::MajorKeyFromKey(key));
           out.AddFormatted(" %s, %s, ", Code::Kind2String(kind),
-                           CodeStub::MajorName(major_key, false));
+                           CodeStub::MajorName(major_key));
           out.AddFormatted("minor: %d", minor_key);
         } else {
           out.AddFormatted(" %s", Code::Kind2String(kind));

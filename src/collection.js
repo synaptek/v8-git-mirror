@@ -4,14 +4,6 @@
 
 var $getHash;
 var $getExistingHash;
-var $mapSet;
-var $mapHas;
-var $mapDelete;
-var $setAdd;
-var $setHas;
-var $setDelete;
-var $mapFromArray;
-var $setFromArray;
 
 (function(global, utils) {
 "use strict";
@@ -24,7 +16,9 @@ var $setFromArray;
 var GlobalMap = global.Map;
 var GlobalObject = global.Object;
 var GlobalSet = global.Set;
+var hashCodeSymbol = utils.ImportNow("hash_code_symbol");
 var IntRandom;
+var toStringTagSymbol = utils.ImportNow("to_string_tag_symbol");
 
 utils.Import(function(from) {
   IntRandom = from.IntRandom;
@@ -97,8 +91,6 @@ function ComputeIntegerHash(key, seed) {
   return hash & 0x3fffffff;
 }
 %SetForceInlineFlag(ComputeIntegerHash);
-
-var hashCodeSymbol = GLOBAL_PRIVATE("hash_code_symbol");
 
 function GetExistingHash(key) {
   if (%_IsSmi(key)) {
@@ -268,7 +260,7 @@ function SetForEach(f, receiver) {
   while (%SetIteratorNext(iterator, value_array)) {
     if (stepping) %DebugPrepareStepInIfStepping(f);
     key = value_array[0];
-    var new_receiver = needs_wrapper ? $toObject(receiver) : receiver;
+    var new_receiver = needs_wrapper ? TO_OBJECT(receiver) : receiver;
     %_CallFunction(new_receiver, key, key, this, f);
   }
 }
@@ -279,7 +271,7 @@ function SetForEach(f, receiver) {
 %FunctionSetLength(GlobalSet, 0);
 %FunctionSetPrototype(GlobalSet, new GlobalObject());
 %AddNamedProperty(GlobalSet.prototype, "constructor", GlobalSet, DONT_ENUM);
-%AddNamedProperty(GlobalSet.prototype, symbolToStringTag, "Set",
+%AddNamedProperty(GlobalSet.prototype, toStringTagSymbol, "Set",
                   DONT_ENUM | READ_ONLY);
 
 %FunctionSetLength(SetForEach, 1);
@@ -457,7 +449,7 @@ function MapForEach(f, receiver) {
   var value_array = [UNDEFINED, UNDEFINED];
   while (%MapIteratorNext(iterator, value_array)) {
     if (stepping) %DebugPrepareStepInIfStepping(f);
-    var new_receiver = needs_wrapper ? $toObject(receiver) : receiver;
+    var new_receiver = needs_wrapper ? TO_OBJECT(receiver) : receiver;
     %_CallFunction(new_receiver, value_array[1], value_array[0], this, f);
   }
 }
@@ -469,7 +461,7 @@ function MapForEach(f, receiver) {
 %FunctionSetPrototype(GlobalMap, new GlobalObject());
 %AddNamedProperty(GlobalMap.prototype, "constructor", GlobalMap, DONT_ENUM);
 %AddNamedProperty(
-    GlobalMap.prototype, symbolToStringTag, "Map", DONT_ENUM | READ_ONLY);
+    GlobalMap.prototype, toStringTagSymbol, "Map", DONT_ENUM | READ_ONLY);
 
 %FunctionSetLength(MapForEach, 1);
 
@@ -487,15 +479,8 @@ utils.InstallFunctions(GlobalMap.prototype, DONT_ENUM, [
 // Expose to the global scope.
 $getHash = GetHash;
 $getExistingHash = GetExistingHash;
-$mapGet = MapGet;
-$mapSet = MapSet;
-$mapHas = MapHas;
-$mapDelete = MapDelete;
-$setAdd = SetAdd;
-$setHas = SetHas;
-$setDelete = SetDelete;
 
-$mapFromArray = function(array) {
+function MapFromArray(array) {
   var map = new GlobalMap;
   var length = array.length;
   for (var i = 0; i < length; i += 2) {
@@ -506,7 +491,7 @@ $mapFromArray = function(array) {
   return map;
 };
 
-$setFromArray = function(array) {
+function SetFromArray(array) {
   var set = new GlobalSet;
   var length = array.length;
   for (var i = 0; i < length; ++i) {
@@ -514,5 +499,20 @@ $setFromArray = function(array) {
   }
   return set;
 };
+
+// -----------------------------------------------------------------------
+// Exports
+
+%InstallToContext([
+  "map_get", MapGet,
+  "map_set", MapSet,
+  "map_has", MapHas,
+  "map_delete", MapDelete,
+  "set_add", SetAdd,
+  "set_has", SetHas,
+  "set_delete", SetDelete,
+  "map_from_array", MapFromArray,
+  "set_from_array",SetFromArray,
+]);
 
 })

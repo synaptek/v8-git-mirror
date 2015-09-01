@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
-
 #include "src/runtime-profiler.h"
 
 #include "src/assembler.h"
@@ -12,9 +10,9 @@
 #include "src/code-stubs.h"
 #include "src/compilation-cache.h"
 #include "src/execution.h"
-#include "src/full-codegen.h"
+#include "src/frames-inl.h"
+#include "src/full-codegen/full-codegen.h"
 #include "src/global-handles.h"
-#include "src/heap/mark-compact.h"
 #include "src/scopeinfo.h"
 
 namespace v8 {

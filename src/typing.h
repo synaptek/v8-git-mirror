@@ -5,8 +5,6 @@
 #ifndef V8_TYPING_H_
 #define V8_TYPING_H_
 
-#include "src/v8.h"
-
 #include "src/allocation.h"
 #include "src/ast.h"
 #include "src/effects.h"
@@ -21,17 +19,12 @@ namespace internal {
 
 class AstTyper: public AstVisitor {
  public:
-  static void Run(CompilationInfo* info);
-
-  void* operator new(size_t size, Zone* zone) { return zone->New(size); }
-  void operator delete(void* pointer, Zone* zone) { }
-  void operator delete(void* pointer) { }
+  explicit AstTyper(CompilationInfo* info);
+  void Run();
 
   DEFINE_AST_VISITOR_SUBCLASS_MEMBERS();
 
  private:
-  explicit AstTyper(CompilationInfo* info);
-
   Effect ObservedOnStack(Object* value);
   void ObserveTypesAtOsrEntry(IterationStatement* stmt);
 

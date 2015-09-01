@@ -203,8 +203,8 @@ action("js2c") {
   sources = [
     "src/macros.py",
     "src/messages.h",
-    "src/runtime.js",
     "src/prologue.js",
+    "src/runtime.js",
     "src/v8natives.js",
     "src/symbol.js",
     "src/array.js",
@@ -227,12 +227,12 @@ action("js2c") {
     "src/json.js",
     "src/array-iterator.js",
     "src/string-iterator.js",
-    "src/debug-debugger.js",
-    "src/mirror-debugger.js",
-    "src/liveedit-debugger.js",
     "src/templates.js",
     "src/harmony-array.js",
     "src/harmony-typedarray.js",
+    "src/debug/mirrors.js",
+    "src/debug/debug.js",
+    "src/debug/liveedit.js",
   ]
 
   outputs = [
@@ -313,7 +313,9 @@ action("js2c_experimental") {
     "src/harmony-reflect.js",
     "src/harmony-spread.js",
     "src/harmony-object.js",
-    "src/harmony-sharedarraybuffer.js"
+    "src/harmony-object-observe.js",
+    "src/harmony-sharedarraybuffer.js",
+    "src/harmony-simd.js"
   ]
 
   outputs = [
@@ -365,6 +367,36 @@ action("js2c_extras") {
   }
 }
 
+action("js2c_experimental_extras") {
+  visibility = [ ":*" ]  # Only targets in this file can depend on this.
+
+  script = "tools/js2c.py"
+
+  # The script depends on this other script, this rule causes a rebuild if it
+  # changes.
+  inputs = [ "tools/jsmin.py" ]
+
+  sources = v8_experimental_extra_library_files
+
+  outputs = [
+    "$target_gen_dir/experimental-extras-libraries.cc",
+  ]
+
+  args = [
+           rebase_path("$target_gen_dir/experimental-extras-libraries.cc",
+                       root_build_dir),
+           "EXPERIMENTAL_EXTRAS",
+         ] + rebase_path(sources, root_build_dir)
+
+  if (v8_use_external_startup_data) {
+    outputs += [ "$target_gen_dir/libraries_experimental_extras.bin" ]
+    args += [
+      "--startup_blob",
+      rebase_path("$target_gen_dir/libraries_experimental_extras.bin", root_build_dir),
+    ]
+  }
+}
+
 action("d8_js2c") {
   visibility = [ ":*" ]  # Only targets in this file can depend on this.
 
@@ -392,6 +424,7 @@ if (v8_use_external_startup_data) {
       ":js2c_code_stubs",
       ":js2c_experimental",
       ":js2c_extras",
+      ":js2c_experimental_extras",
     ]
 
     sources = [
@@ -399,6 +432,7 @@ if (v8_use_external_startup_data) {
       "$target_gen_dir/libraries_code_stub.bin",
       "$target_gen_dir/libraries_experimental.bin",
       "$target_gen_dir/libraries_extras.bin",
+      "$target_gen_dir/libraries_experimental_extras.bin",
     ]
 
     outputs = [
@@ -485,6 +519,7 @@ source_set("v8_nosnapshot") {
     ":js2c_code_stubs",
     ":js2c_experimental",
     ":js2c_extras",
+    ":js2c_experimental_extras",
     ":v8_base",
   ]
 
@@ -493,6 +528,7 @@ source_set("v8_nosnapshot") {
     "$target_gen_dir/code-stub-libraries.cc",
     "$target_gen_dir/experimental-libraries.cc",
     "$target_gen_dir/extras-libraries.cc",
+    "$target_gen_dir/experimental-extras-libraries.cc",
     "src/snapshot/snapshot-empty.cc",
   ]
 
@@ -518,6 +554,7 @@ source_set("v8_snapshot") {
     ":js2c_code_stubs",
     ":js2c_experimental",
     ":js2c_extras",
+    ":js2c_experimental_extras",
     ":v8_base",
   ]
   public_deps = [
@@ -531,6 +568,7 @@ source_set("v8_snapshot") {
     "$target_gen_dir/code-stub-libraries.cc",
     "$target_gen_dir/experimental-libraries.cc",
     "$target_gen_dir/extras-libraries.cc",
+    "$target_gen_dir/experimental-extras-libraries.cc",
     "$target_gen_dir/snapshot.cc",
   ]
 
@@ -552,6 +590,7 @@ if (v8_use_external_startup_data) {
       ":js2c_code_stubs",
       ":js2c_experimental",
       ":js2c_extras",
+      ":js2c_experimental_extras",
       ":v8_base",
     ]
     public_deps = [
@@ -604,6 +643,8 @@ source_set("v8_base") {
     "src/assembler.h",
     "src/assert-scope.h",
     "src/assert-scope.cc",
+    "src/ast-expression-visitor.cc",
+    "src/ast-expression-visitor.h",
     "src/ast-literal-reindexer.cc",
     "src/ast-literal-reindexer.h",
     "src/ast-numbering.cc",
@@ -628,13 +669,13 @@ source_set("v8_base") {
     "src/bootstrapper.h",
     "src/builtins.cc",
     "src/builtins.h",
-    "src/bytecodes-irregexp.h",
+    "src/cancelable-task.cc",
+    "src/cancelable-task.h",
     "src/cached-powers.cc",
     "src/cached-powers.h",
     "src/char-predicates.cc",
     "src/char-predicates-inl.h",
     "src/char-predicates.h",
-    "src/checks.cc",
     "src/checks.h",
     "src/circular-queue-inl.h",
     "src/circular-queue.h",
@@ -643,7 +684,6 @@ source_set("v8_base") {
     "src/code-stubs.cc",
     "src/code-stubs.h",
     "src/code-stubs-hydrogen.cc",
-    "src/code.h",
     "src/codegen.cc",
     "src/codegen.h",
     "src/compilation-cache.cc",
@@ -664,6 +704,7 @@ source_set("v8_base") {
     "src/compiler/basic-block-instrumentor.h",
     "src/compiler/change-lowering.cc",
     "src/compiler/change-lowering.h",
+    "src/compiler/c-linkage.cc",
     "src/compiler/coalesced-live-ranges.cc",
     "src/compiler/coalesced-live-ranges.h",
     "src/compiler/code-generator-impl.h",
@@ -684,6 +725,7 @@ source_set("v8_base") {
     "src/compiler/dead-code-elimination.cc",
     "src/compiler/dead-code-elimination.h",
     "src/compiler/diamond.h",
+    "src/compiler/frame.cc",
     "src/compiler/frame.h",
     "src/compiler/frame-elider.cc",
     "src/compiler/frame-elider.h",
@@ -691,7 +733,6 @@ source_set("v8_base") {
     "src/compiler/frame-states.h",
     "src/compiler/gap-resolver.cc",
     "src/compiler/gap-resolver.h",
-    "src/compiler/graph-builder.h",
     "src/compiler/graph-reducer.cc",
     "src/compiler/graph-reducer.h",
     "src/compiler/graph-replay.cc",
@@ -710,8 +751,12 @@ source_set("v8_base") {
     "src/compiler/instruction-selector.h",
     "src/compiler/instruction.cc",
     "src/compiler/instruction.h",
+    "src/compiler/interpreter-assembler.cc",
+    "src/compiler/interpreter-assembler.h",
     "src/compiler/js-builtin-reducer.cc",
     "src/compiler/js-builtin-reducer.h",
+    "src/compiler/js-context-relaxation.cc",
+    "src/compiler/js-context-relaxation.h",
     "src/compiler/js-context-specialization.cc",
     "src/compiler/js-context-specialization.h",
     "src/compiler/js-frame-specialization.cc",
@@ -734,9 +779,10 @@ source_set("v8_base") {
     "src/compiler/js-typed-lowering.h",
     "src/compiler/jump-threading.cc",
     "src/compiler/jump-threading.h",
-    "src/compiler/linkage-impl.h",
     "src/compiler/linkage.cc",
     "src/compiler/linkage.h",
+    "src/compiler/live-range-separator.cc",
+    "src/compiler/live-range-separator.h",
     "src/compiler/liveness-analyzer.cc",
     "src/compiler/liveness-analyzer.h",
     "src/compiler/load-elimination.cc",
@@ -812,6 +858,9 @@ source_set("v8_base") {
     "src/compiler/zone-pool.h",
     "src/compiler.cc",
     "src/compiler.h",
+    "src/context-measure.cc",
+    "src/context-measure.h",
+    "src/contexts-inl.h",
     "src/contexts.cc",
     "src/contexts.h",
     "src/conversions-inl.h",
@@ -827,8 +876,16 @@ source_set("v8_base") {
     "src/dateparser-inl.h",
     "src/dateparser.cc",
     "src/dateparser.h",
-    "src/debug.cc",
-    "src/debug.h",
+    "src/debug/debug-evaluate.cc",
+    "src/debug/debug-evaluate.h",
+    "src/debug/debug-frames.cc",
+    "src/debug/debug-frames.h",
+    "src/debug/debug-scopes.cc",
+    "src/debug/debug-scopes.h",
+    "src/debug/debug.cc",
+    "src/debug/debug.h",
+    "src/debug/liveedit.cc",
+    "src/debug/liveedit.h",
     "src/deoptimizer.cc",
     "src/deoptimizer.h",
     "src/disasm.h",
@@ -871,10 +928,12 @@ source_set("v8_base") {
     "src/frames-inl.h",
     "src/frames.cc",
     "src/frames.h",
-    "src/full-codegen.cc",
-    "src/full-codegen.h",
+    "src/full-codegen/full-codegen.cc",
+    "src/full-codegen/full-codegen.h",
     "src/func-name-inferrer.cc",
     "src/func-name-inferrer.h",
+    "src/futex-emulation.cc",
+    "src/futex-emulation.h",
     "src/gdb-jit.cc",
     "src/gdb-jit.h",
     "src/global-handles.cc",
@@ -896,8 +955,6 @@ source_set("v8_base") {
     "src/heap/heap-inl.h",
     "src/heap/heap.cc",
     "src/heap/heap.h",
-    "src/heap/identity-map.cc",
-    "src/heap/identity-map.h",
     "src/heap/incremental-marking.cc",
     "src/heap/incremental-marking.h",
     "src/heap/mark-compact-inl.h",
@@ -985,17 +1042,23 @@ source_set("v8_base") {
     "src/ic/ic-compiler.h",
     "src/ic/stub-cache.cc",
     "src/ic/stub-cache.h",
+    "src/identity-map.cc",
+    "src/identity-map.h",
     "src/interface-descriptors.cc",
     "src/interface-descriptors.h",
-    "src/interpreter-irregexp.cc",
-    "src/interpreter-irregexp.h",
+    "src/interpreter/bytecodes.cc",
+    "src/interpreter/bytecodes.h",
+    "src/interpreter/bytecode-array-builder.cc",
+    "src/interpreter/bytecode-array-builder.h",
+    "src/interpreter/bytecode-generator.cc",
+    "src/interpreter/bytecode-generator.h",
+    "src/interpreter/interpreter.cc",
+    "src/interpreter/interpreter.h",
+    "src/isolate-inl.h",
     "src/isolate.cc",
     "src/isolate.h",
     "src/json-parser.h",
     "src/json-stringifier.h",
-    "src/jsregexp-inl.h",
-    "src/jsregexp.cc",
-    "src/jsregexp.h",
     "src/layout-descriptor-inl.h",
     "src/layout-descriptor.cc",
     "src/layout-descriptor.h",
@@ -1008,8 +1071,6 @@ source_set("v8_base") {
     "src/lithium-codegen.h",
     "src/lithium.cc",
     "src/lithium.h",
-    "src/liveedit.cc",
-    "src/liveedit.h",
     "src/log-inl.h",
     "src/log-utils.cc",
     "src/log-utils.h",
@@ -1052,17 +1113,23 @@ source_set("v8_base") {
     "src/property.cc",
     "src/property.h",
     "src/prototype.h",
-    "src/regexp-macro-assembler-irregexp-inl.h",
-    "src/regexp-macro-assembler-irregexp.cc",
-    "src/regexp-macro-assembler-irregexp.h",
-    "src/regexp-macro-assembler-tracer.cc",
-    "src/regexp-macro-assembler-tracer.h",
-    "src/regexp-macro-assembler.cc",
-    "src/regexp-macro-assembler.h",
-    "src/regexp-stack.cc",
-    "src/regexp-stack.h",
     "src/rewriter.cc",
     "src/rewriter.h",
+    "src/regexp/bytecodes-irregexp.h",
+    "src/regexp/interpreter-irregexp.cc",
+    "src/regexp/interpreter-irregexp.h",
+    "src/regexp/jsregexp-inl.h",
+    "src/regexp/jsregexp.cc",
+    "src/regexp/jsregexp.h",
+    "src/regexp/regexp-macro-assembler-irregexp-inl.h",
+    "src/regexp/regexp-macro-assembler-irregexp.cc",
+    "src/regexp/regexp-macro-assembler-irregexp.h",
+    "src/regexp/regexp-macro-assembler-tracer.cc",
+    "src/regexp/regexp-macro-assembler-tracer.h",
+    "src/regexp/regexp-macro-assembler.cc",
+    "src/regexp/regexp-macro-assembler.h",
+    "src/regexp/regexp-stack.cc",
+    "src/regexp/regexp-stack.h",
     "src/runtime-profiler.cc",
     "src/runtime-profiler.h",
     "src/runtime/runtime-array.cc",
@@ -1074,6 +1141,7 @@ source_set("v8_base") {
     "src/runtime/runtime-debug.cc",
     "src/runtime/runtime-forin.cc",
     "src/runtime/runtime-function.cc",
+    "src/runtime/runtime-futex.cc",
     "src/runtime/runtime-generator.cc",
     "src/runtime/runtime-i18n.cc",
     "src/runtime/runtime-internal.cc",
@@ -1087,6 +1155,7 @@ source_set("v8_base") {
     "src/runtime/runtime-proxy.cc",
     "src/runtime/runtime-regexp.cc",
     "src/runtime/runtime-scopes.cc",
+    "src/runtime/runtime-simd.cc",
     "src/runtime/runtime-strings.cc",
     "src/runtime/runtime-symbol.cc",
     "src/runtime/runtime-test.cc",
@@ -1111,6 +1180,7 @@ source_set("v8_base") {
     "src/simulator.h",
     "src/small-pointer-list.h",
     "src/snapshot/natives.h",
+    "src/snapshot/natives-common.cc",
     "src/snapshot/serialize.cc",
     "src/snapshot/serialize.h",
     "src/snapshot/snapshot-common.cc",
@@ -1119,9 +1189,10 @@ source_set("v8_base") {
     "src/splay-tree.h",
     "src/splay-tree-inl.h",
     "src/snapshot/snapshot.h",
+    "src/startup-data-util.h",
+    "src/startup-data-util.cc",
     "src/string-builder.cc",
     "src/string-builder.h",
-    "src/string-search.cc",
     "src/string-search.h",
     "src/string-stream.cc",
     "src/string-stream.h",
@@ -1142,6 +1213,8 @@ source_set("v8_base") {
     "src/types-inl.h",
     "src/types.cc",
     "src/types.h",
+    "src/typing-reset.cc",
+    "src/typing-reset.h",
     "src/typing.cc",
     "src/typing.h",
     "src/unbound-queue-inl.h",
@@ -1149,6 +1222,8 @@ source_set("v8_base") {
     "src/unicode-inl.h",
     "src/unicode.cc",
     "src/unicode.h",
+    "src/unicode-cache-inl.h",
+    "src/unicode-cache.h",
     "src/unicode-decoder.cc",
     "src/unicode-decoder.h",
     "src/unique.h",
@@ -1165,6 +1240,7 @@ source_set("v8_base") {
     "src/version.h",
     "src/vm-state-inl.h",
     "src/vm-state.h",
+    "src/zone-type-cache.h",
     "src/zone.cc",
     "src/zone.h",
     "src/zone-allocator.h",
@@ -1184,12 +1260,10 @@ source_set("v8_base") {
       "src/ia32/codegen-ia32.cc",
       "src/ia32/codegen-ia32.h",
       "src/ia32/cpu-ia32.cc",
-      "src/ia32/debug-ia32.cc",
       "src/ia32/deoptimizer-ia32.cc",
       "src/ia32/disasm-ia32.cc",
       "src/ia32/frames-ia32.cc",
       "src/ia32/frames-ia32.h",
-      "src/ia32/full-codegen-ia32.cc",
       "src/ia32/interface-descriptors-ia32.cc",
       "src/ia32/lithium-codegen-ia32.cc",
       "src/ia32/lithium-codegen-ia32.h",
@@ -1199,17 +1273,18 @@ source_set("v8_base") {
       "src/ia32/lithium-ia32.h",
       "src/ia32/macro-assembler-ia32.cc",
       "src/ia32/macro-assembler-ia32.h",
-      "src/ia32/regexp-macro-assembler-ia32.cc",
-      "src/ia32/regexp-macro-assembler-ia32.h",
       "src/compiler/ia32/code-generator-ia32.cc",
       "src/compiler/ia32/instruction-codes-ia32.h",
       "src/compiler/ia32/instruction-selector-ia32.cc",
-      "src/compiler/ia32/linkage-ia32.cc",
+      "src/debug/ia32/debug-ia32.cc",
+      "src/full-codegen/ia32/full-codegen-ia32.cc",
       "src/ic/ia32/access-compiler-ia32.cc",
       "src/ic/ia32/handler-compiler-ia32.cc",
       "src/ic/ia32/ic-ia32.cc",
       "src/ic/ia32/ic-compiler-ia32.cc",
       "src/ic/ia32/stub-cache-ia32.cc",
+      "src/regexp/ia32/regexp-macro-assembler-ia32.cc",
+      "src/regexp/ia32/regexp-macro-assembler-ia32.h",
     ]
   } else if (v8_target_arch == "x64") {
     sources += [
@@ -1222,12 +1297,10 @@ source_set("v8_base") {
       "src/x64/codegen-x64.cc",
       "src/x64/codegen-x64.h",
       "src/x64/cpu-x64.cc",
-      "src/x64/debug-x64.cc",
       "src/x64/deoptimizer-x64.cc",
       "src/x64/disasm-x64.cc",
       "src/x64/frames-x64.cc",
       "src/x64/frames-x64.h",
-      "src/x64/full-codegen-x64.cc",
       "src/x64/interface-descriptors-x64.cc",
       "src/x64/lithium-codegen-x64.cc",
       "src/x64/lithium-codegen-x64.h",
@@ -1237,17 +1310,18 @@ source_set("v8_base") {
       "src/x64/lithium-x64.h",
       "src/x64/macro-assembler-x64.cc",
       "src/x64/macro-assembler-x64.h",
-      "src/x64/regexp-macro-assembler-x64.cc",
-      "src/x64/regexp-macro-assembler-x64.h",
       "src/compiler/x64/code-generator-x64.cc",
       "src/compiler/x64/instruction-codes-x64.h",
       "src/compiler/x64/instruction-selector-x64.cc",
-      "src/compiler/x64/linkage-x64.cc",
+      "src/debug/x64/debug-x64.cc",
+      "src/full-codegen/x64/full-codegen-x64.cc",
       "src/ic/x64/access-compiler-x64.cc",
       "src/ic/x64/handler-compiler-x64.cc",
       "src/ic/x64/ic-x64.cc",
       "src/ic/x64/ic-compiler-x64.cc",
       "src/ic/x64/stub-cache-x64.cc",
+      "src/regexp/x64/regexp-macro-assembler-x64.cc",
+      "src/regexp/x64/regexp-macro-assembler-x64.h",
     ]
   } else if (v8_target_arch == "arm") {
     sources += [
@@ -1262,12 +1336,10 @@ source_set("v8_base") {
       "src/arm/constants-arm.h",
       "src/arm/constants-arm.cc",
       "src/arm/cpu-arm.cc",
-      "src/arm/debug-arm.cc",
       "src/arm/deoptimizer-arm.cc",
       "src/arm/disasm-arm.cc",
       "src/arm/frames-arm.cc",
       "src/arm/frames-arm.h",
-      "src/arm/full-codegen-arm.cc",
       "src/arm/interface-descriptors-arm.cc",
       "src/arm/interface-descriptors-arm.h",
       "src/arm/lithium-arm.cc",
@@ -1278,19 +1350,20 @@ source_set("v8_base") {
       "src/arm/lithium-gap-resolver-arm.h",
       "src/arm/macro-assembler-arm.cc",
       "src/arm/macro-assembler-arm.h",
-      "src/arm/regexp-macro-assembler-arm.cc",
-      "src/arm/regexp-macro-assembler-arm.h",
       "src/arm/simulator-arm.cc",
       "src/arm/simulator-arm.h",
       "src/compiler/arm/code-generator-arm.cc",
       "src/compiler/arm/instruction-codes-arm.h",
       "src/compiler/arm/instruction-selector-arm.cc",
-      "src/compiler/arm/linkage-arm.cc",
+      "src/debug/arm/debug-arm.cc",
+      "src/full-codegen/arm/full-codegen-arm.cc",
       "src/ic/arm/access-compiler-arm.cc",
       "src/ic/arm/handler-compiler-arm.cc",
       "src/ic/arm/ic-arm.cc",
       "src/ic/arm/ic-compiler-arm.cc",
       "src/ic/arm/stub-cache-arm.cc",
+      "src/regexp/arm/regexp-macro-assembler-arm.cc",
+      "src/regexp/arm/regexp-macro-assembler-arm.h",
     ]
   } else if (v8_target_arch == "arm64") {
     sources += [
@@ -1304,7 +1377,6 @@ source_set("v8_base") {
       "src/arm64/code-stubs-arm64.h",
       "src/arm64/constants-arm64.h",
       "src/arm64/cpu-arm64.cc",
-      "src/arm64/debug-arm64.cc",
       "src/arm64/decoder-arm64.cc",
       "src/arm64/decoder-arm64.h",
       "src/arm64/decoder-arm64-inl.h",
@@ -1313,7 +1385,6 @@ source_set("v8_base") {
       "src/arm64/disasm-arm64.h",
       "src/arm64/frames-arm64.cc",
       "src/arm64/frames-arm64.h",
-      "src/arm64/full-codegen-arm64.cc",
       "src/arm64/instructions-arm64.cc",
       "src/arm64/instructions-arm64.h",
       "src/arm64/instrument-arm64.cc",
@@ -1329,8 +1400,6 @@ source_set("v8_base") {
       "src/arm64/macro-assembler-arm64.cc",
       "src/arm64/macro-assembler-arm64.h",
       "src/arm64/macro-assembler-arm64-inl.h",
-      "src/arm64/regexp-macro-assembler-arm64.cc",
-      "src/arm64/regexp-macro-assembler-arm64.h",
       "src/arm64/simulator-arm64.cc",
       "src/arm64/simulator-arm64.h",
       "src/arm64/utils-arm64.cc",
@@ -1338,12 +1407,15 @@ source_set("v8_base") {
       "src/compiler/arm64/code-generator-arm64.cc",
       "src/compiler/arm64/instruction-codes-arm64.h",
       "src/compiler/arm64/instruction-selector-arm64.cc",
-      "src/compiler/arm64/linkage-arm64.cc",
+      "src/debug/arm64/debug-arm64.cc",
+      "src/full-codegen/arm64/full-codegen-arm64.cc",
       "src/ic/arm64/access-compiler-arm64.cc",
       "src/ic/arm64/handler-compiler-arm64.cc",
       "src/ic/arm64/ic-arm64.cc",
       "src/ic/arm64/ic-compiler-arm64.cc",
       "src/ic/arm64/stub-cache-arm64.cc",
+      "src/regexp/arm64/regexp-macro-assembler-arm64.cc",
+      "src/regexp/arm64/regexp-macro-assembler-arm64.h",
     ]
   } else if (v8_target_arch == "mipsel") {
     sources += [
@@ -1358,12 +1430,10 @@ source_set("v8_base") {
       "src/mips/constants-mips.cc",
       "src/mips/constants-mips.h",
       "src/mips/cpu-mips.cc",
-      "src/mips/debug-mips.cc",
       "src/mips/deoptimizer-mips.cc",
       "src/mips/disasm-mips.cc",
       "src/mips/frames-mips.cc",
       "src/mips/frames-mips.h",
-      "src/mips/full-codegen-mips.cc",
       "src/mips/interface-descriptors-mips.cc",
       "src/mips/lithium-codegen-mips.cc",
       "src/mips/lithium-codegen-mips.h",
@@ -1373,19 +1443,20 @@ source_set("v8_base") {
       "src/mips/lithium-mips.h",
       "src/mips/macro-assembler-mips.cc",
       "src/mips/macro-assembler-mips.h",
-      "src/mips/regexp-macro-assembler-mips.cc",
-      "src/mips/regexp-macro-assembler-mips.h",
       "src/mips/simulator-mips.cc",
       "src/mips/simulator-mips.h",
       "src/compiler/mips/code-generator-mips.cc",
       "src/compiler/mips/instruction-codes-mips.h",
       "src/compiler/mips/instruction-selector-mips.cc",
-      "src/compiler/mips/linkage-mips.cc",
+      "src/debug/mips/debug-mips.cc",
+      "src/full-codegen/mips/full-codegen-mips.cc",
       "src/ic/mips/access-compiler-mips.cc",
       "src/ic/mips/handler-compiler-mips.cc",
       "src/ic/mips/ic-mips.cc",
       "src/ic/mips/ic-compiler-mips.cc",
       "src/ic/mips/stub-cache-mips.cc",
+      "src/regexp/mips/regexp-macro-assembler-mips.cc",
+      "src/regexp/mips/regexp-macro-assembler-mips.h",
     ]
   } else if (v8_target_arch == "mips64el") {
     sources += [
@@ -1400,12 +1471,10 @@ source_set("v8_base") {
       "src/mips64/constants-mips64.cc",
       "src/mips64/constants-mips64.h",
       "src/mips64/cpu-mips64.cc",
-      "src/mips64/debug-mips64.cc",
       "src/mips64/deoptimizer-mips64.cc",
       "src/mips64/disasm-mips64.cc",
       "src/mips64/frames-mips64.cc",
       "src/mips64/frames-mips64.h",
-      "src/mips64/full-codegen-mips64.cc",
       "src/mips64/interface-descriptors-mips64.cc",
       "src/mips64/lithium-codegen-mips64.cc",
       "src/mips64/lithium-codegen-mips64.h",
@@ -1415,15 +1484,17 @@ source_set("v8_base") {
       "src/mips64/lithium-mips64.h",
       "src/mips64/macro-assembler-mips64.cc",
       "src/mips64/macro-assembler-mips64.h",
-      "src/mips64/regexp-macro-assembler-mips64.cc",
-      "src/mips64/regexp-macro-assembler-mips64.h",
       "src/mips64/simulator-mips64.cc",
       "src/mips64/simulator-mips64.h",
+      "src/debug/mips64/debug-mips64.cc",
+      "src/full-codegen/mips64/full-codegen-mips64.cc",
       "src/ic/mips64/access-compiler-mips64.cc",
       "src/ic/mips64/handler-compiler-mips64.cc",
       "src/ic/mips64/ic-mips64.cc",
       "src/ic/mips64/ic-compiler-mips64.cc",
       "src/ic/mips64/stub-cache-mips64.cc",
+      "src/regexp/mips64/regexp-macro-assembler-mips64.cc",
+      "src/regexp/mips64/regexp-macro-assembler-mips64.h",
     ]
   }
 
@@ -1519,7 +1590,7 @@ source_set("v8_libbase") {
     "src/base/safe_conversions_impl.h",
     "src/base/safe_math.h",
     "src/base/safe_math_impl.h",
-    "src/hase/smart-pointers.h",
+    "src/base/smart-pointers.h",
     "src/base/sys-info.cc",
     "src/base/sys-info.h",
     "src/base/utils/random-number-generator.cc",
@@ -1721,8 +1792,6 @@ if ((current_toolchain == host_toolchain && v8_toolset_for_d8 == "host") ||
     sources = [
       "src/d8.cc",
       "src/d8.h",
-      "src/startup-data-util.h",
-      "src/startup-data-util.cc",
     ]
 
     configs -= [ "//build/config/compiler:chromium_code" ]
@@ -1743,7 +1812,7 @@ if ((current_toolchain == host_toolchain && v8_toolset_for_d8 == "host") ||
       "//build/config/sanitizers:deps",
     ]
 
-    # TODO(jochen): Add support for readline and vtunejit.
+    # TODO(jochen): Add support for vtunejit.
 
     if (is_posix) {
       sources += [ "src/d8-posix.cc" ]
@@ -1753,8 +1822,6 @@ if ((current_toolchain == host_toolchain && v8_toolset_for_d8 == "host") ||
 
     if (!is_component_build) {
       sources += [
-        "src/d8-debug.cc",
-        "src/d8-debug.h",
         "$target_gen_dir/d8-js.cc",
       ]
     }

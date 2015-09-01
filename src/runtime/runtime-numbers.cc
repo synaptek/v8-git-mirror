@@ -2,13 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
+#include "src/runtime/runtime-utils.h"
 
 #include "src/arguments.h"
 #include "src/base/bits.h"
 #include "src/bootstrapper.h"
 #include "src/codegen.h"
-#include "src/runtime/runtime-utils.h"
 
 
 #ifndef _STLP_VENDOR_CSTD
@@ -113,81 +112,11 @@ RUNTIME_FUNCTION(Runtime_IsValidSmi) {
 }
 
 
-static bool AreDigits(const uint8_t* s, int from, int to) {
-  for (int i = from; i < to; i++) {
-    if (s[i] < '0' || s[i] > '9') return false;
-  }
-
-  return true;
-}
-
-
-static int ParseDecimalInteger(const uint8_t* s, int from, int to) {
-  DCHECK(to - from < 10);  // Overflow is not possible.
-  DCHECK(from < to);
-  int d = s[from] - '0';
-
-  for (int i = from + 1; i < to; i++) {
-    d = 10 * d + (s[i] - '0');
-  }
-
-  return d;
-}
-
-
 RUNTIME_FUNCTION(Runtime_StringToNumber) {
   HandleScope handle_scope(isolate);
-  DCHECK(args.length() == 1);
+  DCHECK_EQ(1, args.length());
   CONVERT_ARG_HANDLE_CHECKED(String, subject, 0);
-  subject = String::Flatten(subject);
-
-  // Fast case: short integer or some sorts of junk values.
-  if (subject->IsSeqOneByteString()) {
-    int len = subject->length();
-    if (len == 0) return Smi::FromInt(0);
-
-    DisallowHeapAllocation no_gc;
-    uint8_t const* data = Handle<SeqOneByteString>::cast(subject)->GetChars();
-    bool minus = (data[0] == '-');
-    int start_pos = (minus ? 1 : 0);
-
-    if (start_pos == len) {
-      return isolate->heap()->nan_value();
-    } else if (data[start_pos] > '9') {
-      // Fast check for a junk value. A valid string may start from a
-      // whitespace, a sign ('+' or '-'), the decimal point, a decimal digit
-      // or the 'I' character ('Infinity'). All of that have codes not greater
-      // than '9' except 'I' and &nbsp;.
-      if (data[start_pos] != 'I' && data[start_pos] != 0xa0) {
-        return isolate->heap()->nan_value();
-      }
-    } else if (len - start_pos < 10 && AreDigits(data, start_pos, len)) {
-      // The maximal/minimal smi has 10 digits. If the string has less digits
-      // we know it will fit into the smi-data type.
-      int d = ParseDecimalInteger(data, start_pos, len);
-      if (minus) {
-        if (d == 0) return isolate->heap()->minus_zero_value();
-        d = -d;
-      } else if (!subject->HasHashCode() && len <= String::kMaxArrayIndexSize &&
-                 (len == 1 || data[0] != '0')) {
-        // String hash is not calculated yet but all the data are present.
-        // Update the hash field to speed up sequential convertions.
-        uint32_t hash = StringHasher::MakeArrayIndexHash(d, len);
-#ifdef DEBUG
-        subject->Hash();  // Force hash calculation.
-        DCHECK_EQ(static_cast<int>(subject->hash_field()),
-                  static_cast<int>(hash));
-#endif
-        subject->set_hash_field(hash);
-      }
-      return Smi::FromInt(d);
-    }
-  }
-
-  // Slower case.
-  int flags = ALLOW_HEX | ALLOW_OCTAL | ALLOW_BINARY;
-  return *isolate->factory()->NewNumber(
-      StringToDouble(isolate->unicode_cache(), subject, flags));
+  return *String::ToNumber(subject);
 }
 
 
@@ -231,7 +160,7 @@ RUNTIME_FUNCTION(Runtime_StringParseFloat) {
 }
 
 
-RUNTIME_FUNCTION(Runtime_NumberToStringRT) {
+RUNTIME_FUNCTION(Runtime_NumberToString) {
   HandleScope scope(isolate);
   DCHECK(args.length() == 1);
   CONVERT_NUMBER_ARG_HANDLE_CHECKED(number, 0);
@@ -268,24 +197,6 @@ RUNTIME_FUNCTION(Runtime_NumberToIntegerMapMinusZero) {
   if (double_value == 0) double_value = 0;
 
   return *isolate->factory()->NewNumber(double_value);
-}
-
-
-RUNTIME_FUNCTION(Runtime_NumberToJSUint32) {
-  HandleScope scope(isolate);
-  DCHECK(args.length() == 1);
-
-  CONVERT_NUMBER_CHECKED(int32_t, number, Uint32, args[0]);
-  return *isolate->factory()->NewNumberFromUint(number);
-}
-
-
-RUNTIME_FUNCTION(Runtime_NumberToJSInt32) {
-  HandleScope scope(isolate);
-  DCHECK(args.length() == 1);
-
-  CONVERT_DOUBLE_ARG_CHECKED(number, 0);
-  return *isolate->factory()->NewNumberFromInt(DoubleToInt32(number));
 }
 
 
@@ -555,12 +466,6 @@ RUNTIME_FUNCTION(Runtime_MaxSmi) {
   SealHandleScope shs(isolate);
   DCHECK(args.length() == 0);
   return Smi::FromInt(Smi::kMaxValue);
-}
-
-
-RUNTIME_FUNCTION(Runtime_NumberToString) {
-  SealHandleScope shs(isolate);
-  return __RT_impl_Runtime_NumberToStringRT(args, isolate);
 }
 
 

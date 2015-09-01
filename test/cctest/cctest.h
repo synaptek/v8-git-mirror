@@ -28,6 +28,9 @@
 #ifndef CCTEST_H_
 #define CCTEST_H_
 
+#include "include/libplatform/libplatform.h"
+#include "src/isolate-inl.h"  // TODO(everyone): Make cctest IWYU.
+#include "src/objects-inl.h"  // TODO(everyone): Make cctest IWYU.
 #include "src/v8.h"
 
 #ifndef TEST
@@ -87,26 +90,12 @@ typedef v8::internal::EnumSet<CcTestExtensionIds> CcTestExtensionFlags;
 #undef DEFINE_EXTENSION_FLAG
 
 
-// Use this to expose protected methods in i::Heap.
-class TestHeap : public i::Heap {
- public:
-  using i::Heap::AllocateByteArray;
-  using i::Heap::AllocateFixedArray;
-  using i::Heap::AllocateHeapNumber;
-  using i::Heap::AllocateFloat32x4;
-  using i::Heap::AllocateJSObject;
-  using i::Heap::AllocateJSObjectFromMap;
-  using i::Heap::AllocateMap;
-  using i::Heap::CopyCode;
-  using i::Heap::kInitialNumberStringCacheSize;
-};
-
-
 class CcTest {
  public:
   typedef void (TestFunction)();
   CcTest(TestFunction* callback, const char* file, const char* name,
          const char* dependency, bool enabled, bool initialize);
+  ~CcTest() { i::DeleteArray(file_); }
   void Run();
   static CcTest* last() { return last_; }
   CcTest* prev() { return prev_; }
@@ -132,10 +121,6 @@ class CcTest {
 
   static i::Heap* heap() {
     return i_isolate()->heap();
-  }
-
-  static TestHeap* test_heap() {
-    return reinterpret_cast<TestHeap*>(i_isolate()->heap());
   }
 
   static v8::base::RandomNumberGenerator* random_number_generator() {
@@ -405,14 +390,6 @@ static inline v8::MaybeLocal<v8::Value> CompileRun(
 }
 
 
-// Compiles source as an ES6 module.
-static inline v8::Local<v8::Value> CompileRunModule(const char* source) {
-  v8::ScriptCompiler::Source script_source(v8_str(source));
-  return v8::ScriptCompiler::CompileModule(v8::Isolate::GetCurrent(),
-                                           &script_source)->Run();
-}
-
-
 static inline v8::Local<v8::Value> CompileRun(v8::Local<v8::String> source) {
   return v8::Script::Compile(source)->Run();
 }
@@ -561,7 +538,8 @@ static inline void SimulateFullSpace(v8::internal::PagedSpace* space) {
 
 // Helper function that simulates many incremental marking steps until
 // marking is completed.
-static inline void SimulateIncrementalMarking(i::Heap* heap) {
+static inline void SimulateIncrementalMarking(i::Heap* heap,
+                                              bool force_completion = true) {
   i::MarkCompactCollector* collector = heap->mark_compact_collector();
   i::IncrementalMarking* marking = heap->incremental_marking();
   if (collector->sweeping_in_progress()) {
@@ -569,9 +547,11 @@ static inline void SimulateIncrementalMarking(i::Heap* heap) {
   }
   CHECK(marking->IsMarking() || marking->IsStopped());
   if (marking->IsStopped()) {
-    marking->Start(i::Heap::kNoGCFlags);
+    heap->StartIncrementalMarking();
   }
   CHECK(marking->IsMarking());
+  if (!force_completion) return;
+
   while (!marking->IsComplete()) {
     marking->Step(i::MB, i::IncrementalMarking::NO_GC_VIA_STACK_GUARD);
     if (marking->IsReadyToOverApproximateWeakClosure()) {
@@ -594,26 +574,11 @@ static inline void EnableDebugger() {
 static inline void DisableDebugger() { v8::Debug::SetDebugEventListener(NULL); }
 
 
-// Helper class for new allocations tracking and checking.
-// To use checking of JS allocations tracking in a test,
-// just create an instance of this class.
-class HeapObjectsTracker {
- public:
-  HeapObjectsTracker() {
-    heap_profiler_ = i::Isolate::Current()->heap_profiler();
-    CHECK_NOT_NULL(heap_profiler_);
-    heap_profiler_->StartHeapObjectsTracking(true);
-  }
-
-  ~HeapObjectsTracker() {
-    i::Isolate::Current()->heap()->CollectAllAvailableGarbage();
-    CHECK_EQ(0, heap_profiler_->heap_object_map()->FindUntrackedObjects());
-    heap_profiler_->StopHeapObjectsTracking();
-  }
-
- private:
-  i::HeapProfiler* heap_profiler_;
-};
+static inline void EmptyMessageQueues(v8::Isolate* isolate) {
+  while (v8::platform::PumpMessageLoop(v8::internal::V8::GetCurrentPlatform(),
+                                       isolate))
+    ;
+}
 
 
 class InitializedHandleScope {

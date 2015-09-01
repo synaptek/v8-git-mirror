@@ -7,101 +7,22 @@
 #include "src/base/flags.h"
 #include "src/base/lazy-instance.h"
 #include "src/bootstrapper.h"
+#include "src/compiler/common-operator.h"
 #include "src/compiler/graph-reducer.h"
 #include "src/compiler/js-operator.h"
 #include "src/compiler/node.h"
 #include "src/compiler/node-properties.h"
 #include "src/compiler/simplified-operator.h"
+#include "src/objects-inl.h"
+#include "src/zone-type-cache.h"
 
 namespace v8 {
 namespace internal {
 namespace compiler {
 
-class TyperCache final {
- private:
-  // This has to be first for the initialization magic to work.
-  Zone zone_;
-
- public:
-  TyperCache() = default;
-
-  Type* const kInt8 =
-      CreateNative(CreateRange<int8_t>(), Type::UntaggedSigned8());
-  Type* const kUint8 =
-      CreateNative(CreateRange<uint8_t>(), Type::UntaggedUnsigned8());
-  Type* const kUint8Clamped = kUint8;
-  Type* const kInt16 =
-      CreateNative(CreateRange<int16_t>(), Type::UntaggedSigned16());
-  Type* const kUint16 =
-      CreateNative(CreateRange<uint16_t>(), Type::UntaggedUnsigned16());
-  Type* const kInt32 = CreateNative(Type::Signed32(), Type::UntaggedSigned32());
-  Type* const kUint32 =
-      CreateNative(Type::Unsigned32(), Type::UntaggedUnsigned32());
-  Type* const kFloat32 = CreateNative(Type::Number(), Type::UntaggedFloat32());
-  Type* const kFloat64 = CreateNative(Type::Number(), Type::UntaggedFloat64());
-
-  Type* const kSingletonZero = CreateRange(0.0, 0.0);
-  Type* const kSingletonOne = CreateRange(1.0, 1.0);
-  Type* const kZeroOrOne = CreateRange(0.0, 1.0);
-  Type* const kZeroish =
-      Type::Union(kSingletonZero, Type::MinusZeroOrNaN(), zone());
-  Type* const kInteger = CreateRange(-V8_INFINITY, V8_INFINITY);
-  Type* const kWeakint = Type::Union(kInteger, Type::MinusZeroOrNaN(), zone());
-  Type* const kWeakintFunc1 = Type::Function(kWeakint, Type::Number(), zone());
-
-  Type* const kRandomFunc0 = Type::Function(Type::OrderedNumber(), zone());
-  Type* const kAnyFunc0 = Type::Function(Type::Any(), zone());
-  Type* const kAnyFunc1 = Type::Function(Type::Any(), Type::Any(), zone());
-  Type* const kAnyFunc2 =
-      Type::Function(Type::Any(), Type::Any(), Type::Any(), zone());
-  Type* const kAnyFunc3 = Type::Function(Type::Any(), Type::Any(), Type::Any(),
-                                         Type::Any(), zone());
-  Type* const kNumberFunc0 = Type::Function(Type::Number(), zone());
-  Type* const kNumberFunc1 =
-      Type::Function(Type::Number(), Type::Number(), zone());
-  Type* const kNumberFunc2 =
-      Type::Function(Type::Number(), Type::Number(), Type::Number(), zone());
-  Type* const kImulFunc = Type::Function(Type::Signed32(), Type::Integral32(),
-                                         Type::Integral32(), zone());
-  Type* const kClz32Func =
-      Type::Function(CreateRange(0, 32), Type::Number(), zone());
-
-#define TYPED_ARRAY(TypeName, type_name, TYPE_NAME, ctype, size) \
-  Type* const k##TypeName##Array = CreateArray(k##TypeName);
-  TYPED_ARRAYS(TYPED_ARRAY)
-#undef TYPED_ARRAY
-
- private:
-  Type* CreateArray(Type* element) { return Type::Array(element, zone()); }
-
-  Type* CreateArrayFunction(Type* array) {
-    Type* arg1 = Type::Union(Type::Unsigned32(), Type::Object(), zone());
-    Type* arg2 = Type::Union(Type::Unsigned32(), Type::Undefined(), zone());
-    Type* arg3 = arg2;
-    return Type::Function(array, arg1, arg2, arg3, zone());
-  }
-
-  Type* CreateNative(Type* semantic, Type* representation) {
-    return Type::Intersect(semantic, representation, zone());
-  }
-
-  template <typename T>
-  Type* CreateRange() {
-    return CreateRange(std::numeric_limits<T>::min(),
-                       std::numeric_limits<T>::max());
-  }
-
-  Type* CreateRange(double min, double max) {
-    return Type::Range(min, max, zone());
-  }
-
-  Zone* zone() { return &zone_; }
-};
-
-
 namespace {
 
-base::LazyInstance<TyperCache>::type kCache = LAZY_INSTANCE_INITIALIZER;
+base::LazyInstance<ZoneTypeCache>::type kCache = LAZY_INSTANCE_INITIALIZER;
 
 }  // namespace
 
@@ -563,7 +484,7 @@ Bounds Typer::Visitor::TypeStart(Node* node) {
 
 
 Bounds Typer::Visitor::TypeIfException(Node* node) {
-  return Bounds::Unbounded(zone());
+  return Bounds::Unbounded();
 }
 
 
@@ -571,18 +492,18 @@ Bounds Typer::Visitor::TypeIfException(Node* node) {
 
 
 Bounds Typer::Visitor::TypeParameter(Node* node) {
-  int param = OpParameter<int>(node);
-  Type::FunctionType* function_type = typer_->function_type();
-  if (function_type != nullptr && param >= 0 &&
-      param < static_cast<int>(function_type->Arity())) {
-    return Bounds(Type::None(), function_type->Parameter(param));
+  if (Type::FunctionType* function_type = typer_->function_type()) {
+    int const index = ParameterIndexOf(node->op());
+    if (index >= 0 && index < function_type->Arity()) {
+      return Bounds(Type::None(), function_type->Parameter(index));
+    }
   }
-  return Bounds::Unbounded(zone());
+  return Bounds::Unbounded();
 }
 
 
 Bounds Typer::Visitor::TypeOsrValue(Node* node) {
-  return Bounds::Unbounded(zone());
+  return Bounds::Unbounded();
 }
 
 
@@ -621,7 +542,7 @@ Bounds Typer::Visitor::TypeNumberConstant(Node* node) {
 
 
 Bounds Typer::Visitor::TypeHeapConstant(Node* node) {
-  return Bounds(TypeConstant(OpParameter<Unique<HeapObject> >(node).handle()));
+  return Bounds(TypeConstant(OpParameter<Handle<HeapObject>>(node)));
 }
 
 
@@ -685,18 +606,18 @@ Bounds Typer::Visitor::TypeTypedStateValues(Node* node) {
 
 
 Bounds Typer::Visitor::TypeCall(Node* node) {
-  return Bounds::Unbounded(zone());
+  return Bounds::Unbounded();
 }
 
 
 Bounds Typer::Visitor::TypeProjection(Node* node) {
   // TODO(titzer): use the output type of the input to determine the bounds.
-  return Bounds::Unbounded(zone());
+  return Bounds::Unbounded();
 }
 
 
 Bounds Typer::Visitor::TypeDead(Node* node) {
-  return Bounds::Unbounded(zone());
+  return Bounds::Unbounded();
 }
 
 
@@ -1284,12 +1205,12 @@ Bounds Typer::Visitor::TypeJSLoadProperty(Node* node) {
 
 
 Bounds Typer::Visitor::TypeJSLoadNamed(Node* node) {
-  return Bounds::Unbounded(zone());
+  return Bounds::Unbounded();
 }
 
 
 Bounds Typer::Visitor::TypeJSLoadGlobal(Node* node) {
-  return Bounds::Unbounded(zone());
+  return Bounds::Unbounded();
 }
 
 
@@ -1457,12 +1378,12 @@ Bounds Typer::Visitor::TypeJSStoreContext(Node* node) {
 
 
 Bounds Typer::Visitor::TypeJSLoadDynamicGlobal(Node* node) {
-  return Bounds::Unbounded(zone());
+  return Bounds::Unbounded();
 }
 
 
 Bounds Typer::Visitor::TypeJSLoadDynamicContext(Node* node) {
-  return Bounds::Unbounded(zone());
+  return Bounds::Unbounded();
 }
 
 
@@ -1512,7 +1433,7 @@ Bounds Typer::Visitor::TypeJSCreateScriptContext(Node* node) {
 
 
 Bounds Typer::Visitor::TypeJSYield(Node* node) {
-  return Bounds::Unbounded(zone());
+  return Bounds::Unbounded();
 }
 
 
@@ -1558,10 +1479,12 @@ Bounds Typer::Visitor::TypeJSCallRuntime(Node* node) {
       return Bounds(Type::None(), Type::Range(0, 32, zone()));
     case Runtime::kInlineStringGetLength:
       return Bounds(Type::None(), Type::Range(0, String::kMaxLength, zone()));
+    case Runtime::kInlineToObject:
+      return Bounds(Type::None(), Type::Receiver());
     default:
       break;
   }
-  return Bounds::Unbounded(zone());
+  return Bounds::Unbounded();
 }
 
 
@@ -1573,7 +1496,7 @@ Bounds Typer::Visitor::TypeJSForInNext(Node* node) {
 
 Bounds Typer::Visitor::TypeJSForInPrepare(Node* node) {
   // TODO(bmeurer): Return a tuple type here.
-  return Bounds::Unbounded(zone());
+  return Bounds::Unbounded();
 }
 
 
@@ -1590,7 +1513,7 @@ Bounds Typer::Visitor::TypeJSForInStep(Node* node) {
 
 
 Bounds Typer::Visitor::TypeJSStackCheck(Node* node) {
-  return Bounds::Unbounded(zone());
+  return Bounds::Unbounded();
 }
 
 
@@ -1842,7 +1765,7 @@ Bounds Typer::Visitor::TypeObjectIsNonNegativeSmi(Node* node) {
 // Machine operators.
 
 Bounds Typer::Visitor::TypeLoad(Node* node) {
-  return Bounds::Unbounded(zone());
+  return Bounds::Unbounded();
 }
 
 
@@ -2291,7 +2214,7 @@ Bounds Typer::Visitor::TypeLoadFramePointer(Node* node) {
 
 
 Bounds Typer::Visitor::TypeCheckedLoad(Node* node) {
-  return Bounds::Unbounded(zone());
+  return Bounds::Unbounded();
 }
 
 

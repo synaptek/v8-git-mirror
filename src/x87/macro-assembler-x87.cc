@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
-
 #if V8_TARGET_ARCH_X87
 
 #include "src/base/bits.h"
@@ -11,8 +9,9 @@
 #include "src/bootstrapper.h"
 #include "src/codegen.h"
 #include "src/cpu-profiler.h"
-#include "src/debug.h"
+#include "src/debug/debug.h"
 #include "src/runtime/runtime.h"
+#include "src/x87/frames-x87.h"
 
 namespace v8 {
 namespace internal {
@@ -67,8 +66,7 @@ void MacroAssembler::Store(Register src, const Operand& dst, Representation r) {
 
 void MacroAssembler::LoadRoot(Register destination, Heap::RootListIndex index) {
   if (isolate()->heap()->RootCanBeTreatedAsConstant(index)) {
-    Handle<Object> value(&isolate()->heap()->roots_array_start()[index]);
-    mov(destination, value);
+    mov(destination, isolate()->heap()->root_handle(index));
     return;
   }
   ExternalReference roots_array_start =
@@ -106,16 +104,14 @@ void MacroAssembler::CompareRoot(Register with,
 
 void MacroAssembler::CompareRoot(Register with, Heap::RootListIndex index) {
   DCHECK(isolate()->heap()->RootCanBeTreatedAsConstant(index));
-  Handle<Object> value(&isolate()->heap()->roots_array_start()[index]);
-  cmp(with, value);
+  cmp(with, isolate()->heap()->root_handle(index));
 }
 
 
 void MacroAssembler::CompareRoot(const Operand& with,
                                  Heap::RootListIndex index) {
   DCHECK(isolate()->heap()->RootCanBeTreatedAsConstant(index));
-  Handle<Object> value(&isolate()->heap()->roots_array_start()[index]);
-  cmp(with, value);
+  cmp(with, isolate()->heap()->root_handle(index));
 }
 
 
@@ -493,7 +489,8 @@ void MacroAssembler::RecordWrite(
 
 void MacroAssembler::DebugBreak() {
   Move(eax, Immediate(0));
-  mov(ebx, Immediate(ExternalReference(Runtime::kDebugBreak, isolate())));
+  mov(ebx, Immediate(ExternalReference(Runtime::kHandleDebuggerStatement,
+                                       isolate())));
   CEntryStub ces(isolate(), 1);
   call(ces.GetCode(), RelocInfo::DEBUGGER_STATEMENT);
 }
@@ -1761,33 +1758,8 @@ void MacroAssembler::GetMapConstructor(Register result, Register map,
 }
 
 
-void MacroAssembler::TryGetFunctionPrototype(Register function,
-                                             Register result,
-                                             Register scratch,
-                                             Label* miss,
-                                             bool miss_on_bound_function) {
-  Label non_instance;
-  if (miss_on_bound_function) {
-    // Check that the receiver isn't a smi.
-    JumpIfSmi(function, miss);
-
-    // Check that the function really is a function.
-    CmpObjectType(function, JS_FUNCTION_TYPE, result);
-    j(not_equal, miss);
-
-    // If a bound function, go to miss label.
-    mov(scratch,
-        FieldOperand(function, JSFunction::kSharedFunctionInfoOffset));
-    BooleanBitTest(scratch, SharedFunctionInfo::kCompilerHintsOffset,
-                   SharedFunctionInfo::kBoundFunction);
-    j(not_zero, miss);
-
-    // Make sure that the function has an instance prototype.
-    movzx_b(scratch, FieldOperand(result, Map::kBitFieldOffset));
-    test(scratch, Immediate(1 << Map::kHasNonInstancePrototype));
-    j(not_zero, &non_instance);
-  }
-
+void MacroAssembler::TryGetFunctionPrototype(Register function, Register result,
+                                             Register scratch, Label* miss) {
   // Get the prototype or initial map from the function.
   mov(result,
       FieldOperand(function, JSFunction::kPrototypeOrInitialMapOffset));
@@ -1801,19 +1773,10 @@ void MacroAssembler::TryGetFunctionPrototype(Register function,
   // If the function does not have an initial map, we're done.
   Label done;
   CmpObjectType(result, MAP_TYPE, scratch);
-  j(not_equal, &done);
+  j(not_equal, &done, Label::kNear);
 
   // Get the prototype from the initial map.
   mov(result, FieldOperand(result, Map::kPrototypeOffset));
-
-  if (miss_on_bound_function) {
-    jmp(&done);
-
-    // Non-instance prototype: Fetch prototype from constructor field
-    // in initial map.
-    bind(&non_instance);
-    GetMapConstructor(result, result, scratch);
-  }
 
   // All done.
   bind(&done);
@@ -2058,8 +2021,7 @@ void MacroAssembler::InvokeFunction(Handle<JSFunction> function,
 }
 
 
-void MacroAssembler::InvokeBuiltin(Builtins::JavaScript id,
-                                   InvokeFlag flag,
+void MacroAssembler::InvokeBuiltin(int native_context_index, InvokeFlag flag,
                                    const CallWrapper& call_wrapper) {
   // You can't call a builtin without a valid frame.
   DCHECK(flag == JUMP_FUNCTION || has_frame());
@@ -2068,26 +2030,26 @@ void MacroAssembler::InvokeBuiltin(Builtins::JavaScript id,
   // arguments match the expected number of arguments. Fake a
   // parameter count to avoid emitting code to do the check.
   ParameterCount expected(0);
-  GetBuiltinFunction(edi, id);
+  GetBuiltinFunction(edi, native_context_index);
   InvokeCode(FieldOperand(edi, JSFunction::kCodeEntryOffset),
              expected, expected, flag, call_wrapper);
 }
 
 
 void MacroAssembler::GetBuiltinFunction(Register target,
-                                        Builtins::JavaScript id) {
+                                        int native_context_index) {
   // Load the JavaScript builtin function from the builtins object.
   mov(target, Operand(esi, Context::SlotOffset(Context::GLOBAL_OBJECT_INDEX)));
-  mov(target, FieldOperand(target, GlobalObject::kBuiltinsOffset));
-  mov(target, FieldOperand(target,
-                           JSBuiltinsObject::OffsetOfFunctionWithId(id)));
+  mov(target, FieldOperand(target, GlobalObject::kNativeContextOffset));
+  mov(target, ContextOperand(target, native_context_index));
 }
 
 
-void MacroAssembler::GetBuiltinEntry(Register target, Builtins::JavaScript id) {
+void MacroAssembler::GetBuiltinEntry(Register target,
+                                     int native_context_index) {
   DCHECK(!target.is(edi));
   // Load the JavaScript builtin function from the builtins object.
-  GetBuiltinFunction(edi, id);
+  GetBuiltinFunction(edi, native_context_index);
   // Load the code entry point from the function into the target register.
   mov(target, FieldOperand(edi, JSFunction::kCodeEntryOffset));
 }
@@ -3055,14 +3017,22 @@ void MacroAssembler::JumpIfDictionaryInPrototypeChain(
   DCHECK(!scratch1.is(scratch0));
   Factory* factory = isolate()->factory();
   Register current = scratch0;
-  Label loop_again;
+  Label loop_again, end;
 
   // scratch contained elements pointer.
   mov(current, object);
+  mov(current, FieldOperand(current, HeapObject::kMapOffset));
+  mov(current, FieldOperand(current, Map::kPrototypeOffset));
+  cmp(current, Immediate(factory->null_value()));
+  j(equal, &end);
 
   // Loop based on the map going up the prototype chain.
   bind(&loop_again);
   mov(current, FieldOperand(current, HeapObject::kMapOffset));
+  STATIC_ASSERT(JS_PROXY_TYPE < JS_OBJECT_TYPE);
+  STATIC_ASSERT(JS_VALUE_TYPE < JS_OBJECT_TYPE);
+  CmpInstanceType(current, JS_OBJECT_TYPE);
+  j(below, found);
   mov(scratch1, FieldOperand(current, Map::kBitField2Offset));
   DecodeField<Map::ElementsKindBits>(scratch1);
   cmp(scratch1, Immediate(DICTIONARY_ELEMENTS));
@@ -3070,6 +3040,8 @@ void MacroAssembler::JumpIfDictionaryInPrototypeChain(
   mov(current, FieldOperand(current, Map::kPrototypeOffset));
   cmp(current, Immediate(factory->null_value()));
   j(not_equal, &loop_again);
+
+  bind(&end);
 }
 
 

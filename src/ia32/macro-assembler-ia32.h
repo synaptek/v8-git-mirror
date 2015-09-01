@@ -13,6 +13,22 @@
 namespace v8 {
 namespace internal {
 
+// Give alias names to registers for calling conventions.
+const Register kReturnRegister0 = {kRegister_eax_Code};
+const Register kReturnRegister1 = {kRegister_edx_Code};
+const Register kJSFunctionRegister = {kRegister_edi_Code};
+const Register kContextRegister = {kRegister_esi_Code};
+const Register kInterpreterAccumulatorRegister = {kRegister_eax_Code};
+const Register kInterpreterRegisterFileRegister = {kRegister_edx_Code};
+const Register kInterpreterBytecodeOffsetRegister = {kRegister_ecx_Code};
+const Register kInterpreterBytecodeArrayRegister = {kRegister_edi_Code};
+const Register kInterpreterDispatchTableRegister = {kRegister_ebx_Code};
+const Register kRuntimeCallFunctionRegister = {kRegister_ebx_Code};
+const Register kRuntimeCallArgCountRegister = {kRegister_eax_Code};
+
+// Spill slots used by interpreter dispatch calling convention.
+const int kInterpreterContextSpillSlot = -1;
+
 // Convenience for platform-independent signatures.  We do not normally
 // distinguish memory operands from other operands on ia32.
 typedef Operand MemOperand;
@@ -341,17 +357,15 @@ class MacroAssembler: public Assembler {
                       InvokeFlag flag,
                       const CallWrapper& call_wrapper);
 
-  // Invoke specified builtin JavaScript function. Adds an entry to
-  // the unresolved list if the name does not resolve.
-  void InvokeBuiltin(Builtins::JavaScript id,
-                     InvokeFlag flag,
+  // Invoke specified builtin JavaScript function.
+  void InvokeBuiltin(int native_context_index, InvokeFlag flag,
                      const CallWrapper& call_wrapper = NullCallWrapper());
 
   // Store the function for the given builtin in the target register.
-  void GetBuiltinFunction(Register target, Builtins::JavaScript id);
+  void GetBuiltinFunction(Register target, int native_context_index);
 
   // Store the code object for the given builtin in the target register.
-  void GetBuiltinEntry(Register target, Builtins::JavaScript id);
+  void GetBuiltinEntry(Register target, int native_context_index);
 
   // Expression support
   // cvtsi2sd instruction only writes to the low 64-bit of dst register, which
@@ -715,11 +729,8 @@ class MacroAssembler: public Assembler {
   // function and jumps to the miss label if the fast checks fail. The
   // function register will be untouched; the other registers may be
   // clobbered.
-  void TryGetFunctionPrototype(Register function,
-                               Register result,
-                               Register scratch,
-                               Label* miss,
-                               bool miss_on_bound_function = false);
+  void TryGetFunctionPrototype(Register function, Register result,
+                               Register scratch, Label* miss);
 
   // Picks out an array index from the hash field.
   // Register use:
@@ -1025,7 +1036,7 @@ class MacroAssembler: public Assembler {
 class CodePatcher {
  public:
   CodePatcher(byte* address, int size);
-  virtual ~CodePatcher();
+  ~CodePatcher();
 
   // Macro assembler to emit code.
   MacroAssembler* masm() { return &masm_; }
@@ -1065,6 +1076,11 @@ inline Operand FixedArrayElementOperand(Register array,
 
 inline Operand ContextOperand(Register context, int index) {
   return Operand(context, Context::SlotOffset(index));
+}
+
+
+inline Operand ContextOperand(Register context, Register index) {
+  return Operand(context, index, times_pointer_size, Context::SlotOffset(0));
 }
 
 

@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
-
 #include "src/interface-descriptors.h"
 
 namespace v8 {
@@ -104,7 +102,21 @@ void StoreTransitionDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
   Register registers[] = {ReceiverRegister(), NameRegister(), ValueRegister(),
                           MapRegister()};
+
   data->InitializePlatformSpecific(arraysize(registers), registers);
+}
+
+
+Type::FunctionType*
+StoreTransitionDescriptor::BuildCallInterfaceDescriptorFunctionType(
+    Isolate* isolate, int paramater_count) {
+  Type::FunctionType* function = Type::FunctionType::New(
+      AnyTagged(), Type::Undefined(), 4, isolate->interface_descriptor_zone());
+  function->InitParameter(0, AnyTagged());  // Receiver
+  function->InitParameter(1, AnyTagged());  // Name
+  function->InitParameter(2, AnyTagged());  // Value
+  function->InitParameter(3, AnyTagged());  // Map
+  return function;
 }
 
 
@@ -112,17 +124,15 @@ Type::FunctionType*
 LoadGlobalViaContextDescriptor::BuildCallInterfaceDescriptorFunctionType(
     Isolate* isolate, int paramater_count) {
   Type::FunctionType* function = Type::FunctionType::New(
-      AnyTagged(), Type::Undefined(), 3, isolate->interface_descriptor_zone());
-  function->InitParameter(0, SmiType());
-  function->InitParameter(1, SmiType());
-  function->InitParameter(2, AnyTagged());
+      AnyTagged(), Type::Undefined(), 1, isolate->interface_descriptor_zone());
+  function->InitParameter(0, UntaggedSigned32());
   return function;
 }
 
 
 void LoadGlobalViaContextDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
-  Register registers[] = {DepthRegister(), SlotRegister(), NameRegister()};
+  Register registers[] = {SlotRegister()};
   data->InitializePlatformSpecific(arraysize(registers), registers);
 }
 
@@ -131,34 +141,37 @@ Type::FunctionType*
 StoreGlobalViaContextDescriptor::BuildCallInterfaceDescriptorFunctionType(
     Isolate* isolate, int paramater_count) {
   Type::FunctionType* function = Type::FunctionType::New(
-      AnyTagged(), Type::Undefined(), 5, isolate->interface_descriptor_zone());
-  function->InitParameter(0, SmiType());
-  function->InitParameter(1, SmiType());
-  function->InitParameter(2, AnyTagged());
-  function->InitParameter(3, AnyTagged());
+      AnyTagged(), Type::Undefined(), 2, isolate->interface_descriptor_zone());
+  function->InitParameter(0, UntaggedSigned32());
+  function->InitParameter(1, AnyTagged());
   return function;
 }
 
 
 void StoreGlobalViaContextDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
-  Register registers[] = {DepthRegister(), SlotRegister(), NameRegister(),
-                          ValueRegister()};
+  Register registers[] = {SlotRegister(), ValueRegister()};
   data->InitializePlatformSpecific(arraysize(registers), registers);
 }
 
 
-void ElementTransitionAndStoreDescriptor::InitializePlatformSpecific(
+void InstanceOfDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
-  Register registers[] = {ValueRegister(), MapRegister(), NameRegister(),
-                          ReceiverRegister()};
+  Register registers[] = {LeftRegister(), RightRegister()};
   data->InitializePlatformSpecific(arraysize(registers), registers);
 }
 
 
-void InstanceofDescriptor::InitializePlatformSpecific(
+void ToStringDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
-  Register registers[] = {left(), right()};
+  Register registers[] = {ReceiverRegister()};
+  data->InitializePlatformSpecific(arraysize(registers), registers);
+}
+
+
+void ToObjectDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  Register registers[] = {ReceiverRegister()};
   data->InitializePlatformSpecific(arraysize(registers), registers);
 }
 
@@ -195,6 +208,21 @@ void LoadWithVectorDescriptor::InitializePlatformSpecific(
   Register registers[] = {ReceiverRegister(), NameRegister(), SlotRegister(),
                           VectorRegister()};
   data->InitializePlatformSpecific(arraysize(registers), registers);
+}
+
+
+Type::FunctionType*
+VectorStoreTransitionDescriptor::BuildCallInterfaceDescriptorFunctionType(
+    Isolate* isolate, int paramater_count) {
+  Type::FunctionType* function = Type::FunctionType::New(
+      AnyTagged(), Type::Undefined(), 6, isolate->interface_descriptor_zone());
+  function->InitParameter(0, AnyTagged());  // receiver
+  function->InitParameter(1, AnyTagged());  // name
+  function->InitParameter(2, AnyTagged());  // value
+  function->InitParameter(3, SmiType());    // slot
+  function->InitParameter(4, AnyTagged());  // vector
+  function->InitParameter(5, AnyTagged());  // map
+  return function;
 }
 
 

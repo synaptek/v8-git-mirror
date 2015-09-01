@@ -2,14 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
-
 #if V8_TARGET_ARCH_X64
 
 #include "src/code-factory.h"
 #include "src/codegen.h"
 #include "src/deoptimizer.h"
-#include "src/full-codegen.h"
+#include "src/full-codegen/full-codegen.h"
 
 namespace v8 {
 namespace internal {
@@ -116,12 +114,9 @@ static void Generate_JSConstructStubHelper(MacroAssembler* masm,
   {
     FrameScope scope(masm, StackFrame::CONSTRUCT);
 
-    if (create_memento) {
-      __ AssertUndefinedOrAllocationSite(rbx);
-      __ Push(rbx);
-    }
-
     // Preserve the incoming parameters on the stack.
+    __ AssertUndefinedOrAllocationSite(rbx);
+    __ Push(rbx);
     __ Integer32ToSmi(rax, rax);
     __ Push(rax);
     __ Push(rdi);
@@ -228,7 +223,10 @@ static void Generate_JSConstructStubHelper(MacroAssembler* masm,
         __ j(less, &no_inobject_slack_tracking);
 
         // Allocate object with a slack.
-        __ movzxbp(rsi, FieldOperand(rax, Map::kInObjectPropertiesOffset));
+        __ movzxbp(
+            rsi,
+            FieldOperand(
+                rax, Map::kInObjectPropertiesOrConstructorFunctionIndexOffset));
         __ movzxbp(rax, FieldOperand(rax, Map::kUnusedPropertyFieldsOffset));
         __ subp(rsi, rax);
         __ leap(rsi,
@@ -254,7 +252,8 @@ static void Generate_JSConstructStubHelper(MacroAssembler* masm,
         __ Move(Operand(rsi, AllocationMemento::kMapOffset),
                 factory->allocation_memento_map());
         // Get the cell or undefined.
-        __ movp(rdx, Operand(rsp, kPointerSize*2));
+        __ movp(rdx, Operand(rsp, 3 * kPointerSize));
+        __ AssertUndefinedOrAllocationSite(rdx);
         __ movp(Operand(rsi, AllocationMemento::kAllocationSiteOffset), rdx);
       } else {
         __ InitializeFieldsWithFiller(rcx, rdi, rdx);
@@ -420,11 +419,13 @@ void Builtins::Generate_JSConstructStubForDerived(MacroAssembler* masm) {
   //  -- rbx: allocation site or undefined
   //  -- rdx: original constructor
   // -----------------------------------
-  // TODO(dslomov): support pretenuring
-  CHECK(!FLAG_pretenuring_call_new);
 
   {
     FrameScope frame_scope(masm, StackFrame::CONSTRUCT);
+
+    // Preserve allocation site.
+    __ AssertUndefinedOrAllocationSite(rbx);
+    __ Push(rbx);
 
     // Store a smi-tagged arguments count on the stack.
     __ Integer32ToSmi(rax, rax);
@@ -524,7 +525,7 @@ static void Generate_CheckStackOverflow(MacroAssembler* masm,
     __ Integer32ToSmi(rax, rax);
   }
   __ Push(rax);
-  __ InvokeBuiltin(Builtins::STACK_OVERFLOW, CALL_FUNCTION);
+  __ InvokeBuiltin(Context::STACK_OVERFLOW_BUILTIN_INDEX, CALL_FUNCTION);
 
   __ bind(&okay);
 }
@@ -663,6 +664,152 @@ void Builtins::Generate_JSEntryTrampoline(MacroAssembler* masm) {
 
 void Builtins::Generate_JSConstructEntryTrampoline(MacroAssembler* masm) {
   Generate_JSEntryTrampolineHelper(masm, true);
+}
+
+
+// Generate code for entering a JS function with the interpreter.
+// On entry to the function the receiver and arguments have been pushed on the
+// stack left to right.  The actual argument count matches the formal parameter
+// count expected by the function.
+//
+// The live registers are:
+//   o rdi: the JS function object being called
+//   o rsi: our context
+//   o rbp: the caller's frame pointer
+//   o rsp: stack pointer (pointing to return address)
+//
+// The function builds a JS frame.  Please see JavaScriptFrameConstants in
+// frames-x64.h for its layout.
+// TODO(rmcilroy): We will need to include the current bytecode pointer in the
+// frame.
+void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
+  // Open a frame scope to indicate that there is a frame on the stack.  The
+  // MANUAL indicates that the scope shouldn't actually generate code to set up
+  // the frame (that is done below).
+  FrameScope frame_scope(masm, StackFrame::MANUAL);
+  __ pushq(rbp);  // Caller's frame pointer.
+  __ movp(rbp, rsp);
+  __ Push(rsi);  // Callee's context.
+  __ Push(rdi);  // Callee's JS function.
+
+  // Get the bytecode array from the function object and load the pointer to the
+  // first entry into edi (InterpreterBytecodeRegister).
+  __ movp(rax, FieldOperand(rdi, JSFunction::kSharedFunctionInfoOffset));
+  __ movp(kInterpreterBytecodeArrayRegister,
+          FieldOperand(rax, SharedFunctionInfo::kFunctionDataOffset));
+
+  if (FLAG_debug_code) {
+    // Check function data field is actually a BytecodeArray object.
+    __ AssertNotSmi(kInterpreterBytecodeArrayRegister);
+    __ CmpObjectType(kInterpreterBytecodeArrayRegister, BYTECODE_ARRAY_TYPE,
+                     rax);
+    __ Assert(equal, kFunctionDataShouldBeBytecodeArrayOnInterpreterEntry);
+  }
+
+  // Allocate the local and temporary register file on the stack.
+  {
+    // Load frame size from the BytecodeArray object.
+    __ movl(rcx, FieldOperand(kInterpreterBytecodeArrayRegister,
+                              BytecodeArray::kFrameSizeOffset));
+
+    // Do a stack check to ensure we don't go over the limit.
+    Label ok;
+    __ movp(rdx, rsp);
+    __ subp(rdx, rcx);
+    __ CompareRoot(rdx, Heap::kRealStackLimitRootIndex);
+    __ j(above_equal, &ok, Label::kNear);
+    __ InvokeBuiltin(Context::STACK_OVERFLOW_BUILTIN_INDEX, CALL_FUNCTION);
+    __ bind(&ok);
+
+    // If ok, push undefined as the initial value for all register file entries.
+    Label loop_header;
+    Label loop_check;
+    __ LoadRoot(rdx, Heap::kUndefinedValueRootIndex);
+    __ j(always, &loop_check);
+    __ bind(&loop_header);
+    // TODO(rmcilroy): Consider doing more than one push per loop iteration.
+    __ Push(rdx);
+    // Continue loop if not done.
+    __ bind(&loop_check);
+    __ subp(rcx, Immediate(kPointerSize));
+    __ j(greater_equal, &loop_header, Label::kNear);
+  }
+
+  // TODO(rmcilroy): List of things not currently dealt with here but done in
+  // fullcodegen's prologue:
+  //  - Support profiler (specifically profiling_counter).
+  //  - Call ProfileEntryHookStub when isolate has a function_entry_hook.
+  //  - Allow simulator stop operations if FLAG_stop_at is set.
+  //  - Deal with sloppy mode functions which need to replace the
+  //    receiver with the global proxy when called as functions (without an
+  //    explicit receiver object).
+  //  - Code aging of the BytecodeArray object.
+  //  - Supporting FLAG_trace.
+  //
+  // The following items are also not done here, and will probably be done using
+  // explicit bytecodes instead:
+  //  - Allocating a new local context if applicable.
+  //  - Setting up a local binding to the this function, which is used in
+  //    derived constructors with super calls.
+  //  - Setting new.target if required.
+  //  - Dealing with REST parameters (only if
+  //    https://codereview.chromium.org/1235153006 doesn't land by then).
+  //  - Dealing with argument objects.
+
+  // Perform stack guard check.
+  {
+    Label ok;
+    __ CompareRoot(rsp, Heap::kStackLimitRootIndex);
+    __ j(above_equal, &ok, Label::kNear);
+    __ CallRuntime(Runtime::kStackGuard, 0);
+    __ bind(&ok);
+  }
+
+  // Load accumulator, register file, bytecode offset, dispatch table into
+  // registers.
+  __ LoadRoot(kInterpreterAccumulatorRegister, Heap::kUndefinedValueRootIndex);
+  __ movp(kInterpreterRegisterFileRegister, rbp);
+  __ subp(
+      kInterpreterRegisterFileRegister,
+      Immediate(kPointerSize + StandardFrameConstants::kFixedFrameSizeFromFp));
+  __ movp(kInterpreterBytecodeOffsetRegister,
+          Immediate(BytecodeArray::kHeaderSize - kHeapObjectTag));
+  __ LoadRoot(kInterpreterDispatchTableRegister,
+              Heap::kInterpreterTableRootIndex);
+  __ addp(kInterpreterDispatchTableRegister,
+          Immediate(FixedArray::kHeaderSize - kHeapObjectTag));
+
+  // Dispatch to the first bytecode handler for the function.
+  __ movzxbp(rbx, Operand(kInterpreterBytecodeArrayRegister,
+                          kInterpreterBytecodeOffsetRegister, times_1, 0));
+  __ movp(rbx, Operand(kInterpreterDispatchTableRegister, rbx,
+                       times_pointer_size, 0));
+  // TODO(rmcilroy): Make dispatch table point to code entrys to avoid untagging
+  // and header removal.
+  __ addp(rbx, Immediate(Code::kHeaderSize - kHeapObjectTag));
+  __ call(rbx);
+}
+
+
+void Builtins::Generate_InterpreterExitTrampoline(MacroAssembler* masm) {
+  // TODO(rmcilroy): List of things not currently dealt with here but done in
+  // fullcodegen's EmitReturnSequence.
+  //  - Supporting FLAG_trace for Runtime::TraceExit.
+  //  - Support profiler (specifically decrementing profiling_counter
+  //    appropriately and calling out to HandleInterrupts if necessary).
+
+  // The return value is in accumulator, which is already in rax.
+
+  // Leave the frame (also dropping the register file).
+  __ leave();
+
+  // Drop receiver + arguments and return.
+  __ movl(rbx, FieldOperand(kInterpreterBytecodeArrayRegister,
+                            BytecodeArray::kParameterSizeOffset));
+  __ PopReturnAddressTo(rcx);
+  __ addp(rsp, rbx);
+  __ PushReturnAddressFrom(rcx);
+  __ ret(0);
 }
 
 
@@ -926,8 +1073,9 @@ void Builtins::Generate_FunctionCall(MacroAssembler* masm) {
       __ Integer32ToSmi(rax, rax);
       __ Push(rax);
 
-      __ Push(rbx);
-      __ InvokeBuiltin(Builtins::TO_OBJECT, CALL_FUNCTION);
+      __ movp(rax, rbx);
+      ToObjectStub stub(masm->isolate());
+      __ CallStub(&stub);
       __ movp(rbx, rax);
       __ Set(rdx, 0);  // indicate regular JS_FUNCTION
 
@@ -993,12 +1141,12 @@ void Builtins::Generate_FunctionCall(MacroAssembler* masm) {
     __ Push(rdi);  // re-add proxy object as additional argument
     __ PushReturnAddressFrom(rdx);
     __ incp(rax);
-    __ GetBuiltinEntry(rdx, Builtins::CALL_FUNCTION_PROXY);
+    __ GetBuiltinEntry(rdx, Context::CALL_FUNCTION_PROXY_BUILTIN_INDEX);
     __ jmp(masm->isolate()->builtins()->ArgumentsAdaptorTrampoline(),
            RelocInfo::CODE_TARGET);
 
     __ bind(&non_proxy);
-    __ GetBuiltinEntry(rdx, Builtins::CALL_NON_FUNCTION);
+    __ GetBuiltinEntry(rdx, Context::CALL_NON_FUNCTION_BUILTIN_INDEX);
     __ Jump(masm->isolate()->builtins()->ArgumentsAdaptorTrampoline(),
             RelocInfo::CODE_TARGET);
     __ bind(&function);
@@ -1038,7 +1186,8 @@ static void Generate_PushAppliedArguments(MacroAssembler* masm,
   __ movp(receiver, Operand(rbp, argumentsOffset));  // load arguments
 
   // Use inline caching to speed up access to arguments.
-  FeedbackVectorSpec spec(0, Code::KEYED_LOAD_IC);
+  Code::Kind kinds[] = {Code::KEYED_LOAD_IC};
+  FeedbackVectorSpec spec(0, 1, kinds);
   Handle<TypeFeedbackVector> feedback_vector =
       masm->isolate()->factory()->NewTypeFeedbackVector(&spec);
   int index = feedback_vector->GetIndex(FeedbackVectorICSlot(0));
@@ -1094,9 +1243,10 @@ static void Generate_ApplyHelper(MacroAssembler* masm, bool targetIsArgument) {
     __ Push(Operand(rbp, kFunctionOffset));
     __ Push(Operand(rbp, kArgumentsOffset));
     if (targetIsArgument) {
-      __ InvokeBuiltin(Builtins::REFLECT_APPLY_PREPARE, CALL_FUNCTION);
+      __ InvokeBuiltin(Context::REFLECT_APPLY_PREPARE_BUILTIN_INDEX,
+                       CALL_FUNCTION);
     } else {
-      __ InvokeBuiltin(Builtins::APPLY_PREPARE, CALL_FUNCTION);
+      __ InvokeBuiltin(Context::APPLY_PREPARE_BUILTIN_INDEX, CALL_FUNCTION);
     }
 
     Generate_CheckStackOverflow(masm, kFunctionOffset, kRaxIsSmiTagged);
@@ -1147,8 +1297,9 @@ static void Generate_ApplyHelper(MacroAssembler* masm, bool targetIsArgument) {
 
     // Convert the receiver to an object.
     __ bind(&call_to_object);
-    __ Push(rbx);
-    __ InvokeBuiltin(Builtins::TO_OBJECT, CALL_FUNCTION);
+    __ movp(rax, rbx);
+    ToObjectStub stub(masm->isolate());
+    __ CallStub(&stub);
     __ movp(rbx, rax);
     __ jmp(&push_receiver, Label::kNear);
 
@@ -1181,7 +1332,7 @@ static void Generate_ApplyHelper(MacroAssembler* masm, bool targetIsArgument) {
     __ Push(rdi);  // add function proxy as last argument
     __ incp(rax);
     __ Set(rbx, 0);
-    __ GetBuiltinEntry(rdx, Builtins::CALL_FUNCTION_PROXY);
+    __ GetBuiltinEntry(rdx, Context::CALL_FUNCTION_PROXY_BUILTIN_INDEX);
     __ call(masm->isolate()->builtins()->ArgumentsAdaptorTrampoline(),
             RelocInfo::CODE_TARGET);
 
@@ -1226,7 +1377,8 @@ static void Generate_ConstructHelper(MacroAssembler* masm) {
     __ Push(Operand(rbp, kFunctionOffset));
     __ Push(Operand(rbp, kArgumentsOffset));
     __ Push(Operand(rbp, kNewTargetOffset));
-    __ InvokeBuiltin(Builtins::REFLECT_CONSTRUCT_PREPARE, CALL_FUNCTION);
+    __ InvokeBuiltin(Context::REFLECT_CONSTRUCT_PREPARE_BUILTIN_INDEX,
+                     CALL_FUNCTION);
 
     Generate_CheckStackOverflow(masm, kFunctionOffset, kRaxIsSmiTagged);
 
@@ -1236,8 +1388,7 @@ static void Generate_ConstructHelper(MacroAssembler* masm) {
     const int kIndexOffset = kLimitOffset - 1 * kPointerSize;
     __ Push(rax);  // limit
     __ Push(Immediate(0));  // index
-    // Push newTarget and callee functions
-    __ Push(Operand(rbp, kNewTargetOffset));
+    // Push the constructor function as callee.
     __ Push(Operand(rbp, kFunctionOffset));
 
     // Loop over the arguments array, pushing each value to the stack
@@ -1247,12 +1398,11 @@ static void Generate_ConstructHelper(MacroAssembler* masm) {
     // Use undefined feedback vector
     __ LoadRoot(rbx, Heap::kUndefinedValueRootIndex);
     __ movp(rdi, Operand(rbp, kFunctionOffset));
+    __ movp(rcx, Operand(rbp, kNewTargetOffset));
 
     // Call the function.
     CallConstructStub stub(masm->isolate(), SUPER_CONSTRUCTOR_CALL);
     __ call(stub.GetCode(), RelocInfo::CONSTRUCT_CALL);
-
-    __ Drop(1);
 
     // Leave internal frame.
   }
@@ -1434,8 +1584,8 @@ void Builtins::Generate_StringConstructCode(MacroAssembler* masm) {
   {
     FrameScope scope(masm, StackFrame::INTERNAL);
     __ Push(rdi);  // Preserve the function.
-    __ Push(rax);
-    __ InvokeBuiltin(Builtins::TO_STRING, CALL_FUNCTION);
+    ToStringStub stub(masm->isolate());
+    __ CallStub(&stub);
     __ Pop(rdi);
   }
   __ movp(rbx, rax);
@@ -1630,6 +1780,9 @@ void Builtins::Generate_ArgumentsAdaptorTrampoline(MacroAssembler* masm) {
 
   // Call the entry point.
   __ bind(&invoke);
+  __ movp(rax, rbx);
+  // rax : expected number of arguments
+  // rdi: function (passed through to callee)
   __ call(rdx);
 
   // Store offset of return address for deoptimizer.
@@ -1649,7 +1802,7 @@ void Builtins::Generate_ArgumentsAdaptorTrampoline(MacroAssembler* masm) {
   {
     FrameScope frame(masm, StackFrame::MANUAL);
     EnterArgumentsAdaptorFrame(masm);
-    __ InvokeBuiltin(Builtins::STACK_OVERFLOW, CALL_FUNCTION);
+    __ InvokeBuiltin(Context::STACK_OVERFLOW_BUILTIN_INDEX, CALL_FUNCTION);
     __ int3();
   }
 }

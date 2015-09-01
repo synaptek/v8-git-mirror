@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
-
 #if V8_TARGET_ARCH_X64
 
 #include "src/bootstrapper.h"
@@ -13,8 +11,8 @@
 #include "src/ic/ic.h"
 #include "src/ic/stub-cache.h"
 #include "src/isolate.h"
-#include "src/jsregexp.h"
-#include "src/regexp-macro-assembler.h"
+#include "src/regexp/jsregexp.h"
+#include "src/regexp/regexp-macro-assembler.h"
 #include "src/runtime/runtime.h"
 
 namespace v8 {
@@ -32,7 +30,7 @@ static void InitializeArrayConstructorDescriptor(
                            JS_FUNCTION_STUB_MODE);
   } else {
     descriptor->Initialize(rax, deopt_handler, constant_stack_parameter_count,
-                           JS_FUNCTION_STUB_MODE, PASS_ARGUMENTS);
+                           JS_FUNCTION_STUB_MODE);
   }
 }
 
@@ -48,7 +46,7 @@ static void InitializeInternalArrayConstructorDescriptor(
                            JS_FUNCTION_STUB_MODE);
   } else {
     descriptor->Initialize(rax, deopt_handler, constant_stack_parameter_count,
-                           JS_FUNCTION_STUB_MODE, PASS_ARGUMENTS);
+                           JS_FUNCTION_STUB_MODE);
   }
 }
 
@@ -592,7 +590,7 @@ void ArgumentsAccessStub::GenerateReadElement(MacroAssembler* masm) {
   __ PopReturnAddressTo(rbx);
   __ Push(rdx);
   __ PushReturnAddressFrom(rbx);
-  __ TailCallRuntime(Runtime::kGetArgumentsProperty, 1, 1);
+  __ TailCallRuntime(Runtime::kArguments, 1, 1);
 }
 
 
@@ -888,10 +886,7 @@ void LoadIndexedInterceptorStub::Generate(MacroAssembler* masm) {
   __ PushReturnAddressFrom(scratch);
 
   // Perform tail call to the entry.
-  __ TailCallExternalReference(
-      ExternalReference(IC_Utility(IC::kLoadElementWithInterceptor),
-                        masm->isolate()),
-      2, 1);
+  __ TailCallRuntime(Runtime::kLoadElementWithInterceptor, 2, 1);
 
   __ bind(&slow);
   PropertyAccessCompiler::TailCallBuiltin(
@@ -1576,6 +1571,9 @@ void CompareICStub::GenerateGeneric(MacroAssembler* masm) {
       // Call runtime on identical symbols since we need to throw a TypeError.
       __ cmpb(rcx, Immediate(static_cast<uint8_t>(SYMBOL_TYPE)));
       __ j(equal, &runtime_call, Label::kFar);
+      // Call runtime on identical SIMD values since we must throw a TypeError.
+      __ cmpb(rcx, Immediate(static_cast<uint8_t>(SIMD128_VALUE_TYPE)));
+      __ j(equal, &runtime_call, Label::kFar);
       if (is_strong(strength())) {
         // We have already tested for smis and heap numbers, so if both
         // arguments are not strings we must proceed to the slow case.
@@ -1763,31 +1761,39 @@ void CompareICStub::GenerateGeneric(MacroAssembler* masm) {
   __ Push(rax);
 
   // Figure out which native to call and setup the arguments.
-  Builtins::JavaScript builtin;
-  if (cc == equal) {
-    builtin = strict() ? Builtins::STRICT_EQUALS : Builtins::EQUALS;
+  if (cc == equal && strict()) {
+    __ PushReturnAddressFrom(rcx);
+    __ TailCallRuntime(Runtime::kStrictEquals, 2, 1);
   } else {
-    builtin =
-        is_strong(strength()) ? Builtins::COMPARE_STRONG : Builtins::COMPARE;
-    __ Push(Smi::FromInt(NegativeComparisonResult(cc)));
+    int context_index;
+    if (cc == equal) {
+      context_index = Context::EQUALS_BUILTIN_INDEX;
+    } else {
+      context_index = is_strong(strength())
+                          ? Context::COMPARE_STRONG_BUILTIN_INDEX
+                          : Context::COMPARE_BUILTIN_INDEX;
+      __ Push(Smi::FromInt(NegativeComparisonResult(cc)));
+    }
+
+    __ PushReturnAddressFrom(rcx);
+
+    // Call the native; it returns -1 (less), 0 (equal), or 1 (greater)
+    // tagged as a small integer.
+    __ InvokeBuiltin(context_index, JUMP_FUNCTION);
   }
-
-  __ PushReturnAddressFrom(rcx);
-
-  // Call the native; it returns -1 (less), 0 (equal), or 1 (greater)
-  // tagged as a small integer.
-  __ InvokeBuiltin(builtin, JUMP_FUNCTION);
 
   __ bind(&miss);
   GenerateMiss(masm);
 }
 
 
-static void CallStubInRecordCallTarget(MacroAssembler* masm, CodeStub* stub) {
-  // eax : number of arguments to the construct function
-  // ebx : Feedback vector
-  // edx : slot in feedback vector (Smi)
-  // edi : the function to call
+static void CallStubInRecordCallTarget(MacroAssembler* masm, CodeStub* stub,
+                                       bool is_super) {
+  // rax : number of arguments to the construct function
+  // rbx : feedback vector
+  // rcx : original constructor (for IsSuperConstructorCall)
+  // rdx : slot in feedback vector (Smi)
+  // rdi : the function to call
   FrameScope scope(masm, StackFrame::INTERNAL);
 
   // Number-of-arguments register must be smi-tagged to call out.
@@ -1797,9 +1803,15 @@ static void CallStubInRecordCallTarget(MacroAssembler* masm, CodeStub* stub) {
   __ Integer32ToSmi(rdx, rdx);
   __ Push(rdx);
   __ Push(rbx);
+  if (is_super) {
+    __ Push(rcx);
+  }
 
   __ CallStub(stub);
 
+  if (is_super) {
+    __ Pop(rcx);
+  }
   __ Pop(rbx);
   __ Pop(rdx);
   __ Pop(rdi);
@@ -1808,39 +1820,40 @@ static void CallStubInRecordCallTarget(MacroAssembler* masm, CodeStub* stub) {
 }
 
 
-static void GenerateRecordCallTarget(MacroAssembler* masm) {
+static void GenerateRecordCallTarget(MacroAssembler* masm, bool is_super) {
   // Cache the called function in a feedback vector slot.  Cache states
   // are uninitialized, monomorphic (indicated by a JSFunction), and
   // megamorphic.
   // rax : number of arguments to the construct function
-  // rbx : Feedback vector
+  // rbx : feedback vector
+  // rcx : original constructor (for IsSuperConstructorCall)
   // rdx : slot in feedback vector (Smi)
   // rdi : the function to call
   Isolate* isolate = masm->isolate();
   Label initialize, done, miss, megamorphic, not_array_function,
       done_no_smi_convert;
 
-  // Load the cache state into rcx.
+  // Load the cache state into r11.
   __ SmiToInteger32(rdx, rdx);
-  __ movp(rcx, FieldOperand(rbx, rdx, times_pointer_size,
-                            FixedArray::kHeaderSize));
+  __ movp(r11,
+          FieldOperand(rbx, rdx, times_pointer_size, FixedArray::kHeaderSize));
 
   // A monomorphic cache hit or an already megamorphic state: invoke the
   // function without changing the state.
-  // We don't know if rcx is a WeakCell or a Symbol, but it's harmless to read
+  // We don't know if r11 is a WeakCell or a Symbol, but it's harmless to read
   // at this position in a symbol (see static asserts in
   // type-feedback-vector.h).
   Label check_allocation_site;
-  __ cmpp(rdi, FieldOperand(rcx, WeakCell::kValueOffset));
+  __ cmpp(rdi, FieldOperand(r11, WeakCell::kValueOffset));
   __ j(equal, &done, Label::kFar);
-  __ CompareRoot(rcx, Heap::kmegamorphic_symbolRootIndex);
+  __ CompareRoot(r11, Heap::kmegamorphic_symbolRootIndex);
   __ j(equal, &done, Label::kFar);
-  __ CompareRoot(FieldOperand(rcx, HeapObject::kMapOffset),
+  __ CompareRoot(FieldOperand(r11, HeapObject::kMapOffset),
                  Heap::kWeakCellMapRootIndex);
   __ j(not_equal, FLAG_pretenuring_call_new ? &miss : &check_allocation_site);
 
   // If the weak cell is cleared, we have a new chance to become monomorphic.
-  __ CheckSmi(FieldOperand(rcx, WeakCell::kValueOffset));
+  __ CheckSmi(FieldOperand(r11, WeakCell::kValueOffset));
   __ j(equal, &initialize);
   __ jmp(&megamorphic);
 
@@ -1850,12 +1863,12 @@ static void GenerateRecordCallTarget(MacroAssembler* masm) {
     // If we didn't have a matching function, and we didn't find the megamorph
     // sentinel, then we have in the slot either some other function or an
     // AllocationSite.
-    __ CompareRoot(FieldOperand(rcx, 0), Heap::kAllocationSiteMapRootIndex);
+    __ CompareRoot(FieldOperand(r11, 0), Heap::kAllocationSiteMapRootIndex);
     __ j(not_equal, &miss);
 
     // Make sure the function is the Array() function
-    __ LoadGlobalFunction(Context::ARRAY_FUNCTION_INDEX, rcx);
-    __ cmpp(rdi, rcx);
+    __ LoadGlobalFunction(Context::ARRAY_FUNCTION_INDEX, r11);
+    __ cmpp(rdi, r11);
     __ j(not_equal, &megamorphic);
     __ jmp(&done);
   }
@@ -1864,7 +1877,7 @@ static void GenerateRecordCallTarget(MacroAssembler* masm) {
 
   // A monomorphic miss (i.e, here the cache is not uninitialized) goes
   // megamorphic.
-  __ CompareRoot(rcx, Heap::kuninitialized_symbolRootIndex);
+  __ CompareRoot(r11, Heap::kuninitialized_symbolRootIndex);
   __ j(equal, &initialize);
   // MegamorphicSentinel is an immortal immovable object (undefined) so no
   // write-barrier is needed.
@@ -1879,19 +1892,19 @@ static void GenerateRecordCallTarget(MacroAssembler* masm) {
 
   if (!FLAG_pretenuring_call_new) {
     // Make sure the function is the Array() function
-    __ LoadGlobalFunction(Context::ARRAY_FUNCTION_INDEX, rcx);
-    __ cmpp(rdi, rcx);
+    __ LoadGlobalFunction(Context::ARRAY_FUNCTION_INDEX, r11);
+    __ cmpp(rdi, r11);
     __ j(not_equal, &not_array_function);
 
     CreateAllocationSiteStub create_stub(isolate);
-    CallStubInRecordCallTarget(masm, &create_stub);
+    CallStubInRecordCallTarget(masm, &create_stub, is_super);
     __ jmp(&done_no_smi_convert);
 
     __ bind(&not_array_function);
   }
 
   CreateWeakCellStub create_stub(isolate);
-  CallStubInRecordCallTarget(masm, &create_stub);
+  CallStubInRecordCallTarget(masm, &create_stub, is_super);
   __ jmp(&done_no_smi_convert);
 
   __ bind(&done);
@@ -1929,7 +1942,7 @@ static void EmitSlowCase(Isolate* isolate,
   __ PushReturnAddressFrom(rcx);
   __ Set(rax, argc + 1);
   __ Set(rbx, 0);
-  __ GetBuiltinEntry(rdx, Builtins::CALL_FUNCTION_PROXY);
+  __ GetBuiltinEntry(rdx, Context::CALL_FUNCTION_PROXY_BUILTIN_INDEX);
   {
     Handle<Code> adaptor =
         masm->isolate()->builtins()->ArgumentsAdaptorTrampoline();
@@ -1942,7 +1955,7 @@ static void EmitSlowCase(Isolate* isolate,
   __ movp(args->GetReceiverOperand(), rdi);
   __ Set(rax, argc);
   __ Set(rbx, 0);
-  __ GetBuiltinEntry(rdx, Builtins::CALL_NON_FUNCTION);
+  __ GetBuiltinEntry(rdx, Context::CALL_NON_FUNCTION_BUILTIN_INDEX);
   Handle<Code> adaptor =
       isolate->builtins()->ArgumentsAdaptorTrampoline();
   __ Jump(adaptor, RelocInfo::CODE_TARGET);
@@ -1955,8 +1968,8 @@ static void EmitWrapCase(MacroAssembler* masm,
   // Wrap the receiver and patch it back onto the stack.
   { FrameScope frame_scope(masm, StackFrame::INTERNAL);
     __ Push(rdi);
-    __ Push(rax);
-    __ InvokeBuiltin(Builtins::TO_OBJECT, CALL_FUNCTION);
+    ToObjectStub stub(masm->isolate());
+    __ CallStub(&stub);
     __ Pop(rdi);
   }
   __ movp(args->GetReceiverOperand(), rax);
@@ -2029,19 +2042,19 @@ void CallFunctionStub::Generate(MacroAssembler* masm) {
 void CallConstructStub::Generate(MacroAssembler* masm) {
   // rax : number of arguments
   // rbx : feedback vector
-  // rdx : (only if rbx is not the megamorphic symbol) slot in feedback
-  //       vector (Smi)
+  // rcx : original constructor (for IsSuperConstructorCall)
+  // rdx : slot in feedback vector (Smi, for RecordCallTarget)
   // rdi : constructor function
   Label slow, non_function_call;
 
   // Check that function is not a smi.
   __ JumpIfSmi(rdi, &non_function_call);
   // Check that function is a JSFunction.
-  __ CmpObjectType(rdi, JS_FUNCTION_TYPE, rcx);
+  __ CmpObjectType(rdi, JS_FUNCTION_TYPE, r11);
   __ j(not_equal, &slow);
 
   if (RecordCallTarget()) {
-    GenerateRecordCallTarget(masm);
+    GenerateRecordCallTarget(masm, IsSuperConstructorCall());
 
     __ SmiToInteger32(rdx, rdx);
     if (FLAG_pretenuring_call_new) {
@@ -2066,7 +2079,7 @@ void CallConstructStub::Generate(MacroAssembler* masm) {
 
   // Pass original constructor to construct stub.
   if (IsSuperConstructorCall()) {
-    __ movp(rdx, Operand(rsp, rax, times_pointer_size, 2 * kPointerSize));
+    __ movp(rdx, rcx);
   } else {
     __ movp(rdx, rdi);
   }
@@ -2081,16 +2094,18 @@ void CallConstructStub::Generate(MacroAssembler* masm) {
 
   // rdi: called object
   // rax: number of arguments
-  // rcx: object map
+  // r11: object map
   Label do_call;
   __ bind(&slow);
-  __ CmpInstanceType(rcx, JS_FUNCTION_PROXY_TYPE);
+  __ CmpInstanceType(r11, JS_FUNCTION_PROXY_TYPE);
   __ j(not_equal, &non_function_call);
-  __ GetBuiltinEntry(rdx, Builtins::CALL_FUNCTION_PROXY_AS_CONSTRUCTOR);
+  __ GetBuiltinEntry(rdx,
+                     Context::CALL_FUNCTION_PROXY_AS_CONSTRUCTOR_BUILTIN_INDEX);
   __ jmp(&do_call);
 
   __ bind(&non_function_call);
-  __ GetBuiltinEntry(rdx, Builtins::CALL_NON_FUNCTION_AS_CONSTRUCTOR);
+  __ GetBuiltinEntry(rdx,
+                     Context::CALL_NON_FUNCTION_AS_CONSTRUCTOR_BUILTIN_INDEX);
   __ bind(&do_call);
   // Set expected number of arguments to zero (not changing rax).
   __ Set(rbx, 0);
@@ -2321,11 +2336,10 @@ void CallICStub::GenerateMiss(MacroAssembler* masm) {
   __ Push(rdx);
 
   // Call the entry.
-  IC::UtilityId id = GetICState() == DEFAULT ? IC::kCallIC_Miss
-                                             : IC::kCallIC_Customization_Miss;
-
-  ExternalReference miss = ExternalReference(IC_Utility(id), masm->isolate());
-  __ CallExternalReference(miss, 3);
+  Runtime::FunctionId id = GetICState() == DEFAULT
+                               ? Runtime::kCallIC_Miss
+                               : Runtime::kCallIC_Customization_Miss;
+  __ CallRuntime(id, 3);
 
   // Move result to edi and exit the internal frame.
   __ movp(rdi, rax);
@@ -2673,220 +2687,108 @@ void JSEntryStub::Generate(MacroAssembler* masm) {
 }
 
 
-void InstanceofStub::Generate(MacroAssembler* masm) {
-  // Implements "value instanceof function" operator.
-  // Expected input state with no inline cache:
-  //   rsp[0]  : return address
-  //   rsp[8]  : function pointer
-  //   rsp[16] : value
-  // Expected input state with an inline one-element cache:
-  //   rsp[0]  : return address
-  //   rsp[8]  : offset from return address to location of inline cache
-  //   rsp[16] : function pointer
-  //   rsp[24] : value
-  // Returns a bitwise zero to indicate that the value
-  // is and instance of the function and anything else to
-  // indicate that the value is not an instance.
+void InstanceOfStub::Generate(MacroAssembler* masm) {
+  Register const object = rdx;              // Object (lhs).
+  Register const function = rax;            // Function (rhs).
+  Register const object_map = rcx;          // Map of {object}.
+  Register const function_map = r8;         // Map of {function}.
+  Register const function_prototype = rdi;  // Prototype of {function}.
 
-  // Fixed register usage throughout the stub.
-  Register object = rax;     // Object (lhs).
-  Register map = rbx;        // Map of the object.
-  Register function = rdx;   // Function (rhs).
-  Register prototype = rdi;  // Prototype of the function.
-  Register scratch = rcx;
+  DCHECK(object.is(InstanceOfDescriptor::LeftRegister()));
+  DCHECK(function.is(InstanceOfDescriptor::RightRegister()));
 
-  static const int kOffsetToMapCheckValue = 2;
-  static const int kOffsetToResultValue = kPointerSize == kInt64Size ? 18 : 14;
-  // The last 4 bytes of the instruction sequence
-  //   movp(rdi, FieldOperand(rax, HeapObject::kMapOffset))
-  //   Move(kScratchRegister, Factory::the_hole_value())
-  // in front of the hole value address.
-  static const unsigned int kWordBeforeMapCheckValue =
-      kPointerSize == kInt64Size ? 0xBA49FF78 : 0xBA41FF78;
-  // The last 4 bytes of the instruction sequence
-  //   __ j(not_equal, &cache_miss);
-  //   __ LoadRoot(ToRegister(instr->result()), Heap::kTheHoleValueRootIndex);
-  // before the offset of the hole value in the root array.
-  static const unsigned int kWordBeforeResultValue =
-      kPointerSize == kInt64Size ? 0x458B4906 : 0x458B4106;
+  // Check if {object} is a smi.
+  Label object_is_smi;
+  __ JumpIfSmi(object, &object_is_smi, Label::kNear);
 
-  int extra_argument_offset = HasCallSiteInlineCheck() ? 1 : 0;
+  // Lookup the {function} and the {object} map in the global instanceof cache.
+  // Note: This is safe because we clear the global instanceof cache whenever
+  // we change the prototype of any object.
+  Label fast_case, slow_case;
+  __ movp(object_map, FieldOperand(object, HeapObject::kMapOffset));
+  __ CompareRoot(function, Heap::kInstanceofCacheFunctionRootIndex);
+  __ j(not_equal, &fast_case, Label::kNear);
+  __ CompareRoot(object_map, Heap::kInstanceofCacheMapRootIndex);
+  __ j(not_equal, &fast_case, Label::kNear);
+  __ LoadRoot(rax, Heap::kInstanceofCacheAnswerRootIndex);
+  __ ret(0);
 
-  DCHECK_EQ(object.code(), InstanceofStub::left().code());
-  DCHECK_EQ(function.code(), InstanceofStub::right().code());
+  // If {object} is a smi we can safely return false if {function} is a JS
+  // function, otherwise we have to miss to the runtime and throw an exception.
+  __ bind(&object_is_smi);
+  __ JumpIfSmi(function, &slow_case);
+  __ CmpObjectType(function, JS_FUNCTION_TYPE, function_map);
+  __ j(not_equal, &slow_case);
+  __ LoadRoot(rax, Heap::kFalseValueRootIndex);
+  __ ret(0);
 
-  // Get the object and function - they are always both needed.
-  // Go slow case if the object is a smi.
-  Label slow;
-  StackArgumentsAccessor args(rsp, 2 + extra_argument_offset,
-                              ARGUMENTS_DONT_CONTAIN_RECEIVER);
-  if (!HasArgsInRegisters()) {
-    __ movp(object, args.GetArgumentOperand(0));
-    __ movp(function, args.GetArgumentOperand(1));
-  }
-  __ JumpIfSmi(object, &slow);
+  // Fast-case: The {function} must be a valid JSFunction.
+  __ bind(&fast_case);
+  __ JumpIfSmi(function, &slow_case);
+  __ CmpObjectType(function, JS_FUNCTION_TYPE, function_map);
+  __ j(not_equal, &slow_case);
 
-  // Check that the left hand is a JS object. Leave its map in rax.
-  __ CmpObjectType(object, FIRST_SPEC_OBJECT_TYPE, map);
-  __ j(below, &slow);
-  __ CmpInstanceType(map, LAST_SPEC_OBJECT_TYPE);
-  __ j(above, &slow);
+  // Ensure that {function} has an instance prototype.
+  __ testb(FieldOperand(function_map, Map::kBitFieldOffset),
+           Immediate(1 << Map::kHasNonInstancePrototype));
+  __ j(not_zero, &slow_case);
 
-  // If there is a call site cache don't look in the global cache, but do the
-  // real lookup and update the call site cache.
-  if (!HasCallSiteInlineCheck() && !ReturnTrueFalseObject()) {
-    // Look up the function and the map in the instanceof cache.
-    Label miss;
-    __ CompareRoot(function, Heap::kInstanceofCacheFunctionRootIndex);
-    __ j(not_equal, &miss, Label::kNear);
-    __ CompareRoot(map, Heap::kInstanceofCacheMapRootIndex);
-    __ j(not_equal, &miss, Label::kNear);
-    __ LoadRoot(rax, Heap::kInstanceofCacheAnswerRootIndex);
-    __ ret((HasArgsInRegisters() ? 0 : 2) * kPointerSize);
-    __ bind(&miss);
-  }
+  // Ensure that {function} is not bound.
+  Register const shared_info = kScratchRegister;
+  __ movp(shared_info,
+          FieldOperand(function, JSFunction::kSharedFunctionInfoOffset));
+  __ TestBitSharedFunctionInfoSpecialField(
+      shared_info, SharedFunctionInfo::kCompilerHintsOffset,
+      SharedFunctionInfo::kBoundFunction);
+  __ j(not_zero, &slow_case);
 
-  // Get the prototype of the function.
-  __ TryGetFunctionPrototype(function, prototype, &slow, true);
+  // Get the "prototype" (or initial map) of the {function}.
+  __ movp(function_prototype,
+          FieldOperand(function, JSFunction::kPrototypeOrInitialMapOffset));
+  __ AssertNotSmi(function_prototype);
 
-  // Check that the function prototype is a JS object.
-  __ JumpIfSmi(prototype, &slow);
-  __ CmpObjectType(prototype, FIRST_SPEC_OBJECT_TYPE, kScratchRegister);
-  __ j(below, &slow);
-  __ CmpInstanceType(kScratchRegister, LAST_SPEC_OBJECT_TYPE);
-  __ j(above, &slow);
+  // Resolve the prototype if the {function} has an initial map.  Afterwards the
+  // {function_prototype} will be either the JSReceiver prototype object or the
+  // hole value, which means that no instances of the {function} were created so
+  // far and hence we should return false.
+  Label function_prototype_valid;
+  Register const function_prototype_map = kScratchRegister;
+  __ CmpObjectType(function_prototype, MAP_TYPE, function_prototype_map);
+  __ j(not_equal, &function_prototype_valid, Label::kNear);
+  __ movp(function_prototype,
+          FieldOperand(function_prototype, Map::kPrototypeOffset));
+  __ bind(&function_prototype_valid);
+  __ AssertNotSmi(function_prototype);
 
-  // Update the global instanceof or call site inlined cache with the current
-  // map and function. The cached answer will be set when it is known below.
-  if (!HasCallSiteInlineCheck()) {
-    __ StoreRoot(function, Heap::kInstanceofCacheFunctionRootIndex);
-    __ StoreRoot(map, Heap::kInstanceofCacheMapRootIndex);
-  } else {
-    // The constants for the code patching are based on push instructions
-    // at the call site.
-    DCHECK(!HasArgsInRegisters());
-    // Get return address and delta to inlined map check.
-    __ movq(kScratchRegister, StackOperandForReturnAddress(0));
-    __ subp(kScratchRegister, args.GetArgumentOperand(2));
-    if (FLAG_debug_code) {
-      __ movl(scratch, Immediate(kWordBeforeMapCheckValue));
-      __ cmpl(Operand(kScratchRegister, kOffsetToMapCheckValue - 4), scratch);
-      __ Assert(equal, kInstanceofStubUnexpectedCallSiteCacheCheck);
-    }
-    __ movp(kScratchRegister,
-            Operand(kScratchRegister, kOffsetToMapCheckValue));
-    __ movp(Operand(kScratchRegister, 0), map);
+  // Update the global instanceof cache with the current {object} map and
+  // {function}.  The cached answer will be set when it is known below.
+  __ StoreRoot(function, Heap::kInstanceofCacheFunctionRootIndex);
+  __ StoreRoot(object_map, Heap::kInstanceofCacheMapRootIndex);
 
-    __ movp(r8, map);
-    // Scratch points at the cell payload. Calculate the start of the object.
-    __ subp(kScratchRegister, Immediate(Cell::kValueOffset - 1));
-    __ RecordWriteField(kScratchRegister, Cell::kValueOffset, r8, function,
-                        kDontSaveFPRegs, OMIT_REMEMBERED_SET, OMIT_SMI_CHECK);
-  }
-
-  // Loop through the prototype chain looking for the function prototype.
-  __ movp(scratch, FieldOperand(map, Map::kPrototypeOffset));
-  Label loop, is_instance, is_not_instance;
-  __ LoadRoot(kScratchRegister, Heap::kNullValueRootIndex);
+  // Loop through the prototype chain looking for the {function} prototype.
+  // Assume true, and change to false if not found.
+  Register const object_prototype = object_map;
+  Label done, loop;
+  __ LoadRoot(rax, Heap::kTrueValueRootIndex);
   __ bind(&loop);
-  __ cmpp(scratch, prototype);
-  __ j(equal, &is_instance, Label::kNear);
-  __ cmpp(scratch, kScratchRegister);
-  // The code at is_not_instance assumes that kScratchRegister contains a
-  // non-zero GCable value (the null object in this case).
-  __ j(equal, &is_not_instance, Label::kNear);
-  __ movp(scratch, FieldOperand(scratch, HeapObject::kMapOffset));
-  __ movp(scratch, FieldOperand(scratch, Map::kPrototypeOffset));
-  __ jmp(&loop);
+  __ movp(object_prototype, FieldOperand(object_map, Map::kPrototypeOffset));
+  __ cmpp(object_prototype, function_prototype);
+  __ j(equal, &done, Label::kNear);
+  __ CompareRoot(object_prototype, Heap::kNullValueRootIndex);
+  __ movp(object_map, FieldOperand(object_prototype, HeapObject::kMapOffset));
+  __ j(not_equal, &loop);
+  __ LoadRoot(rax, Heap::kFalseValueRootIndex);
+  __ bind(&done);
+  __ StoreRoot(rax, Heap::kInstanceofCacheAnswerRootIndex);
+  __ ret(0);
 
-  __ bind(&is_instance);
-  if (!HasCallSiteInlineCheck()) {
-    __ xorl(rax, rax);
-    // Store bitwise zero in the cache.  This is a Smi in GC terms.
-    STATIC_ASSERT(kSmiTag == 0);
-    __ StoreRoot(rax, Heap::kInstanceofCacheAnswerRootIndex);
-    if (ReturnTrueFalseObject()) {
-      __ LoadRoot(rax, Heap::kTrueValueRootIndex);
-    }
-  } else {
-    // Store offset of true in the root array at the inline check site.
-    int true_offset = 0x100 +
-        (Heap::kTrueValueRootIndex << kPointerSizeLog2) - kRootRegisterBias;
-    // Assert it is a 1-byte signed value.
-    DCHECK(true_offset >= 0 && true_offset < 0x100);
-    __ movl(rax, Immediate(true_offset));
-    __ movq(kScratchRegister, StackOperandForReturnAddress(0));
-    __ subp(kScratchRegister, args.GetArgumentOperand(2));
-    __ movb(Operand(kScratchRegister, kOffsetToResultValue), rax);
-    if (FLAG_debug_code) {
-      __ movl(rax, Immediate(kWordBeforeResultValue));
-      __ cmpl(Operand(kScratchRegister, kOffsetToResultValue - 4), rax);
-      __ Assert(equal, kInstanceofStubUnexpectedCallSiteCacheMov);
-    }
-    if (!ReturnTrueFalseObject()) {
-      __ Set(rax, 0);
-    }
-  }
-  __ ret(((HasArgsInRegisters() ? 0 : 2) + extra_argument_offset) *
-         kPointerSize);
-
-  __ bind(&is_not_instance);
-  if (!HasCallSiteInlineCheck()) {
-    // We have to store a non-zero value in the cache.
-    __ StoreRoot(kScratchRegister, Heap::kInstanceofCacheAnswerRootIndex);
-    if (ReturnTrueFalseObject()) {
-      __ LoadRoot(rax, Heap::kFalseValueRootIndex);
-    }
-  } else {
-    // Store offset of false in the root array at the inline check site.
-    int false_offset = 0x100 +
-        (Heap::kFalseValueRootIndex << kPointerSizeLog2) - kRootRegisterBias;
-    // Assert it is a 1-byte signed value.
-    DCHECK(false_offset >= 0 && false_offset < 0x100);
-    __ movl(rax, Immediate(false_offset));
-    __ movq(kScratchRegister, StackOperandForReturnAddress(0));
-    __ subp(kScratchRegister, args.GetArgumentOperand(2));
-    __ movb(Operand(kScratchRegister, kOffsetToResultValue), rax);
-    if (FLAG_debug_code) {
-      __ movl(rax, Immediate(kWordBeforeResultValue));
-      __ cmpl(Operand(kScratchRegister, kOffsetToResultValue - 4), rax);
-      __ Assert(equal, kInstanceofStubUnexpectedCallSiteCacheMov);
-    }
-  }
-  __ ret(((HasArgsInRegisters() ? 0 : 2) + extra_argument_offset) *
-         kPointerSize);
-
-  // Slow-case: Go through the JavaScript implementation.
-  __ bind(&slow);
-  if (!ReturnTrueFalseObject()) {
-    // Tail call the builtin which returns 0 or 1.
-    DCHECK(!HasArgsInRegisters());
-    if (HasCallSiteInlineCheck()) {
-      // Remove extra value from the stack.
-      __ PopReturnAddressTo(rcx);
-      __ Pop(rax);
-      __ PushReturnAddressFrom(rcx);
-    }
-    __ InvokeBuiltin(Builtins::INSTANCE_OF, JUMP_FUNCTION);
-  } else {
-    // Call the builtin and convert 0/1 to true/false.
-    {
-      FrameScope scope(masm, StackFrame::INTERNAL);
-      __ Push(object);
-      __ Push(function);
-      __ InvokeBuiltin(Builtins::INSTANCE_OF, CALL_FUNCTION);
-    }
-    Label true_value, done;
-    __ testq(rax, rax);
-    __ j(zero, &true_value, Label::kNear);
-    __ LoadRoot(rax, Heap::kFalseValueRootIndex);
-    __ jmp(&done, Label::kNear);
-    __ bind(&true_value);
-    __ LoadRoot(rax, Heap::kTrueValueRootIndex);
-    __ bind(&done);
-    __ ret(((HasArgsInRegisters() ? 0 : 2) + extra_argument_offset) *
-           kPointerSize);
-  }
+  // Slow-case: Call the runtime function.
+  __ bind(&slow_case);
+  __ PopReturnAddressTo(kScratchRegister);
+  __ Push(object);
+  __ Push(function);
+  __ PushReturnAddressFrom(kScratchRegister);
+  __ TailCallRuntime(Runtime::kInstanceOf, 2, 1);
 }
 
 
@@ -3263,7 +3165,7 @@ void SubStringStub::Generate(MacroAssembler* masm) {
 
   // Just jump to runtime to create the sub string.
   __ bind(&runtime);
-  __ TailCallRuntime(Runtime::kSubStringRT, 3, 1);
+  __ TailCallRuntime(Runtime::kSubString, 3, 1);
 
   __ bind(&single_char);
   // rax: string
@@ -3322,7 +3224,42 @@ void ToNumberStub::Generate(MacroAssembler* masm) {
   __ PopReturnAddressTo(rcx);     // Pop return address.
   __ Push(rax);                   // Push argument.
   __ PushReturnAddressFrom(rcx);  // Push return address.
-  __ InvokeBuiltin(Builtins::TO_NUMBER, JUMP_FUNCTION);
+  __ TailCallRuntime(Runtime::kToNumber, 1, 1);
+}
+
+
+void ToStringStub::Generate(MacroAssembler* masm) {
+  // The ToString stub takes one argument in rax.
+  Label is_number;
+  __ JumpIfSmi(rax, &is_number, Label::kNear);
+
+  Label not_string;
+  __ CmpObjectType(rax, FIRST_NONSTRING_TYPE, rdi);
+  // rax: receiver
+  // rdi: receiver map
+  __ j(above_equal, &not_string, Label::kNear);
+  __ Ret();
+  __ bind(&not_string);
+
+  Label not_heap_number;
+  __ CompareRoot(rax, Heap::kHeapNumberMapRootIndex);
+  __ j(not_equal, &not_heap_number, Label::kNear);
+  __ bind(&is_number);
+  NumberToStringStub stub(isolate());
+  __ TailCallStub(&stub);
+  __ bind(&not_heap_number);
+
+  Label not_oddball;
+  __ CmpInstanceType(rdi, ODDBALL_TYPE);
+  __ j(not_equal, &not_oddball, Label::kNear);
+  __ movp(rax, FieldOperand(rax, Oddball::kToStringOffset));
+  __ Ret();
+  __ bind(&not_oddball);
+
+  __ PopReturnAddressTo(rcx);     // Pop return address.
+  __ Push(rax);                   // Push argument.
+  __ PushReturnAddressFrom(rcx);  // Push return address.
+  __ TailCallRuntime(Runtime::kToString, 1, 1);
 }
 
 
@@ -3500,7 +3437,7 @@ void StringCompareStub::Generate(MacroAssembler* masm) {
   // Call the runtime; it returns -1 (less), 0 (equal), or 1 (greater)
   // tagged as a small integer.
   __ bind(&runtime);
-  __ TailCallRuntime(Runtime::kStringCompareRT, 2, 1);
+  __ TailCallRuntime(Runtime::kStringCompare, 2, 1);
 }
 
 
@@ -3798,7 +3735,7 @@ void CompareICStub::GenerateStrings(MacroAssembler* masm) {
   if (equality) {
     __ TailCallRuntime(Runtime::kStringEquals, 2, 1);
   } else {
-    __ TailCallRuntime(Runtime::kStringCompareRT, 2, 1);
+    __ TailCallRuntime(Runtime::kStringCompare, 2, 1);
   }
 
   __ bind(&miss);
@@ -3851,16 +3788,13 @@ void CompareICStub::GenerateKnownObjects(MacroAssembler* masm) {
 void CompareICStub::GenerateMiss(MacroAssembler* masm) {
   {
     // Call the runtime system in a fresh internal frame.
-    ExternalReference miss =
-        ExternalReference(IC_Utility(IC::kCompareIC_Miss), isolate());
-
     FrameScope scope(masm, StackFrame::INTERNAL);
     __ Push(rdx);
     __ Push(rax);
     __ Push(rdx);
     __ Push(rax);
     __ Push(Smi::FromInt(op()));
-    __ CallExternalReference(miss, 3);
+    __ CallRuntime(Runtime::kCompareIC_Miss, 3);
 
     // Compute the entry point of the rewritten stub.
     __ leap(rdi, FieldOperand(rax, Code::kHeaderSize));
@@ -3896,12 +3830,12 @@ void NameDictionaryLookupStub::GenerateNegativeLookup(MacroAssembler* masm,
             Immediate(name->Hash() + NameDictionary::GetProbeOffset(i)));
 
     // Scale the index by multiplying by the entry size.
-    DCHECK(NameDictionary::kEntrySize == 3);
+    STATIC_ASSERT(NameDictionary::kEntrySize == 3);
     __ leap(index, Operand(index, index, times_2, 0));  // index *= 3.
 
     Register entity_name = r0;
     // Having undefined at this place means the name is not contained.
-    DCHECK_EQ(kSmiTagSize, 1);
+    STATIC_ASSERT(kSmiTagSize == 1);
     __ movp(entity_name, Operand(properties,
                                  index,
                                  times_pointer_size,
@@ -3967,7 +3901,7 @@ void NameDictionaryLookupStub::GeneratePositiveLookup(MacroAssembler* masm,
     __ andp(r1, r0);
 
     // Scale the index by multiplying by the entry size.
-    DCHECK(NameDictionary::kEntrySize == 3);
+    STATIC_ASSERT(NameDictionary::kEntrySize == 3);
     __ leap(r1, Operand(r1, r1, times_2, 0));  // r1 = r1 * 3
 
     // Check if the key is identical to the name.
@@ -4029,7 +3963,7 @@ void NameDictionaryLookupStub::Generate(MacroAssembler* masm) {
     __ andp(scratch, Operand(rsp, 0));
 
     // Scale the index by multiplying by the entry size.
-    DCHECK(NameDictionary::kEntrySize == 3);
+    STATIC_ASSERT(NameDictionary::kEntrySize == 3);
     __ leap(index(), Operand(scratch, scratch, times_2, 0));  // index *= 3.
 
     // Having undefined at this place means the name is not contained.
@@ -4493,7 +4427,7 @@ void LoadICStub::GenerateImpl(MacroAssembler* masm, bool in_frame) {
   Code::Flags code_flags = Code::RemoveTypeAndHolderFromFlags(
       Code::ComputeHandlerFlags(Code::LOAD_IC));
   masm->isolate()->stub_cache()->GenerateProbe(
-      masm, Code::LOAD_IC, code_flags, false, receiver, name, feedback, no_reg);
+      masm, Code::LOAD_IC, code_flags, receiver, name, feedback, no_reg);
 
   __ bind(&miss);
   LoadIC::GenerateMiss(masm);
@@ -4726,12 +4660,12 @@ static void CreateArrayDispatchOneArgument(MacroAssembler* masm,
 
   Label normal_sequence;
   if (mode == DONT_OVERRIDE) {
-    DCHECK(FAST_SMI_ELEMENTS == 0);
-    DCHECK(FAST_HOLEY_SMI_ELEMENTS == 1);
-    DCHECK(FAST_ELEMENTS == 2);
-    DCHECK(FAST_HOLEY_ELEMENTS == 3);
-    DCHECK(FAST_DOUBLE_ELEMENTS == 4);
-    DCHECK(FAST_HOLEY_DOUBLE_ELEMENTS == 5);
+    STATIC_ASSERT(FAST_SMI_ELEMENTS == 0);
+    STATIC_ASSERT(FAST_HOLEY_SMI_ELEMENTS == 1);
+    STATIC_ASSERT(FAST_ELEMENTS == 2);
+    STATIC_ASSERT(FAST_HOLEY_ELEMENTS == 3);
+    STATIC_ASSERT(FAST_DOUBLE_ELEMENTS == 4);
+    STATIC_ASSERT(FAST_HOLEY_DOUBLE_ELEMENTS == 5);
 
     // is the low bit set? If so, we are holey and that is good.
     __ testb(rdx, Immediate(1));
@@ -5025,6 +4959,161 @@ void InternalArrayConstructorStub::Generate(MacroAssembler* masm) {
 
   __ bind(&fast_elements_case);
   GenerateCase(masm, FAST_ELEMENTS);
+}
+
+
+void LoadGlobalViaContextStub::Generate(MacroAssembler* masm) {
+  Register context_reg = rsi;
+  Register slot_reg = rbx;
+  Register result_reg = rax;
+  Label slow_case;
+
+  // Go up context chain to the script context.
+  for (int i = 0; i < depth(); ++i) {
+    __ movp(rdi, ContextOperand(context_reg, Context::PREVIOUS_INDEX));
+    context_reg = rdi;
+  }
+
+  // Load the PropertyCell value at the specified slot.
+  __ movp(result_reg, ContextOperand(context_reg, slot_reg));
+  __ movp(result_reg, FieldOperand(result_reg, PropertyCell::kValueOffset));
+
+  // Check that value is not the_hole.
+  __ CompareRoot(result_reg, Heap::kTheHoleValueRootIndex);
+  __ j(equal, &slow_case, Label::kNear);
+  __ Ret();
+
+  // Fallback to the runtime.
+  __ bind(&slow_case);
+  __ Integer32ToSmi(slot_reg, slot_reg);
+  __ PopReturnAddressTo(kScratchRegister);
+  __ Push(slot_reg);
+  __ Push(kScratchRegister);
+  __ TailCallRuntime(Runtime::kLoadGlobalViaContext, 1, 1);
+}
+
+
+void StoreGlobalViaContextStub::Generate(MacroAssembler* masm) {
+  Register context_reg = rsi;
+  Register slot_reg = rbx;
+  Register value_reg = rax;
+  Register cell_reg = r8;
+  Register cell_details_reg = rdx;
+  Register cell_value_reg = r9;
+  Label fast_heapobject_case, fast_smi_case, slow_case;
+
+  if (FLAG_debug_code) {
+    __ CompareRoot(value_reg, Heap::kTheHoleValueRootIndex);
+    __ Check(not_equal, kUnexpectedValue);
+  }
+
+  // Go up context chain to the script context.
+  for (int i = 0; i < depth(); ++i) {
+    __ movp(rdi, ContextOperand(context_reg, Context::PREVIOUS_INDEX));
+    context_reg = rdi;
+  }
+
+  // Load the PropertyCell at the specified slot.
+  __ movp(cell_reg, ContextOperand(context_reg, slot_reg));
+
+  // Load PropertyDetails for the cell (actually only the cell_type, kind and
+  // READ_ONLY bit of attributes).
+  __ SmiToInteger32(cell_details_reg,
+                    FieldOperand(cell_reg, PropertyCell::kDetailsOffset));
+  __ andl(cell_details_reg,
+          Immediate(PropertyDetails::PropertyCellTypeField::kMask |
+                    PropertyDetails::KindField::kMask |
+                    PropertyDetails::kAttributesReadOnlyMask));
+
+  // Check if PropertyCell holds mutable data.
+  Label not_mutable_data;
+  __ cmpl(cell_details_reg,
+          Immediate(PropertyDetails::PropertyCellTypeField::encode(
+                        PropertyCellType::kMutable) |
+                    PropertyDetails::KindField::encode(kData)));
+  __ j(not_equal, &not_mutable_data);
+  __ JumpIfSmi(value_reg, &fast_smi_case);
+  __ bind(&fast_heapobject_case);
+  __ movp(FieldOperand(cell_reg, PropertyCell::kValueOffset), value_reg);
+  __ RecordWriteField(cell_reg, PropertyCell::kValueOffset, value_reg,
+                      cell_value_reg, kDontSaveFPRegs, EMIT_REMEMBERED_SET,
+                      OMIT_SMI_CHECK);
+  // RecordWriteField clobbers the value register, so we need to reload.
+  __ movp(value_reg, FieldOperand(cell_reg, PropertyCell::kValueOffset));
+  __ Ret();
+  __ bind(&not_mutable_data);
+
+  // Check if PropertyCell value matches the new value (relevant for Constant,
+  // ConstantType and Undefined cells).
+  Label not_same_value;
+  __ movp(cell_value_reg, FieldOperand(cell_reg, PropertyCell::kValueOffset));
+  __ cmpp(cell_value_reg, value_reg);
+  __ j(not_equal, &not_same_value,
+       FLAG_debug_code ? Label::kFar : Label::kNear);
+  // Make sure the PropertyCell is not marked READ_ONLY.
+  __ testl(cell_details_reg,
+           Immediate(PropertyDetails::kAttributesReadOnlyMask));
+  __ j(not_zero, &slow_case);
+  if (FLAG_debug_code) {
+    Label done;
+    // This can only be true for Constant, ConstantType and Undefined cells,
+    // because we never store the_hole via this stub.
+    __ cmpl(cell_details_reg,
+            Immediate(PropertyDetails::PropertyCellTypeField::encode(
+                          PropertyCellType::kConstant) |
+                      PropertyDetails::KindField::encode(kData)));
+    __ j(equal, &done);
+    __ cmpl(cell_details_reg,
+            Immediate(PropertyDetails::PropertyCellTypeField::encode(
+                          PropertyCellType::kConstantType) |
+                      PropertyDetails::KindField::encode(kData)));
+    __ j(equal, &done);
+    __ cmpl(cell_details_reg,
+            Immediate(PropertyDetails::PropertyCellTypeField::encode(
+                          PropertyCellType::kUndefined) |
+                      PropertyDetails::KindField::encode(kData)));
+    __ Check(equal, kUnexpectedValue);
+    __ bind(&done);
+  }
+  __ Ret();
+  __ bind(&not_same_value);
+
+  // Check if PropertyCell contains data with constant type (and is not
+  // READ_ONLY).
+  __ cmpl(cell_details_reg,
+          Immediate(PropertyDetails::PropertyCellTypeField::encode(
+                        PropertyCellType::kConstantType) |
+                    PropertyDetails::KindField::encode(kData)));
+  __ j(not_equal, &slow_case, Label::kNear);
+
+  // Now either both old and new values must be SMIs or both must be heap
+  // objects with same map.
+  Label value_is_heap_object;
+  __ JumpIfNotSmi(value_reg, &value_is_heap_object, Label::kNear);
+  __ JumpIfNotSmi(cell_value_reg, &slow_case, Label::kNear);
+  // Old and new values are SMIs, no need for a write barrier here.
+  __ bind(&fast_smi_case);
+  __ movp(FieldOperand(cell_reg, PropertyCell::kValueOffset), value_reg);
+  __ Ret();
+  __ bind(&value_is_heap_object);
+  __ JumpIfSmi(cell_value_reg, &slow_case, Label::kNear);
+  Register cell_value_map_reg = cell_value_reg;
+  __ movp(cell_value_map_reg,
+          FieldOperand(cell_value_reg, HeapObject::kMapOffset));
+  __ cmpp(cell_value_map_reg, FieldOperand(value_reg, HeapObject::kMapOffset));
+  __ j(equal, &fast_heapobject_case);
+
+  // Fallback to the runtime.
+  __ bind(&slow_case);
+  __ Integer32ToSmi(slot_reg, slot_reg);
+  __ PopReturnAddressTo(kScratchRegister);
+  __ Push(slot_reg);
+  __ Push(value_reg);
+  __ Push(kScratchRegister);
+  __ TailCallRuntime(is_strict(language_mode())
+                         ? Runtime::kStoreGlobalViaContext_Strict
+                         : Runtime::kStoreGlobalViaContext_Sloppy,
+                     2, 1);
 }
 
 

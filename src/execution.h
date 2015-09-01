@@ -5,10 +5,16 @@
 #ifndef V8_EXECUTION_H_
 #define V8_EXECUTION_H_
 
+#include "src/allocation.h"
+#include "src/base/atomicops.h"
 #include "src/handles.h"
+#include "src/utils.h"
 
 namespace v8 {
 namespace internal {
+
+// Forward declarations.
+class JSRegExp;
 
 class Execution final : public AllStatic {
  public:
@@ -53,10 +59,6 @@ class Execution final : public AllStatic {
                                      Handle<Object> argv[],
                                      MaybeHandle<Object>* exception_out = NULL);
 
-  // ECMA-262 9.3
-  MUST_USE_RESULT static MaybeHandle<Object> ToNumber(
-      Isolate* isolate, Handle<Object> obj);
-
   // ECMA-262 9.4
   MUST_USE_RESULT static MaybeHandle<Object> ToInteger(
       Isolate* isolate, Handle<Object> obj);
@@ -72,10 +74,6 @@ class Execution final : public AllStatic {
 
   // ES6, draft 10-14-14, section 7.1.15
   MUST_USE_RESULT static MaybeHandle<Object> ToLength(
-      Isolate* isolate, Handle<Object> obj);
-
-  // ECMA-262 9.8
-  MUST_USE_RESULT static MaybeHandle<Object> ToString(
       Isolate* isolate, Handle<Object> obj);
 
   // ECMA-262 9.8
@@ -129,6 +127,11 @@ class StackGuard final {
   // Pass the address beyond which the stack should not grow.  The stack
   // is assumed to grow downwards.
   void SetStackLimit(uintptr_t limit);
+
+  // The simulator uses a separate JS stack. Limits on the JS stack might have
+  // to be adjusted in order to reflect overflows of the C stack, because we
+  // cannot rely on the interleaving of frames on the simulator.
+  void AdjustStackLimitForSimulator();
 
   // Threading support.
   char* ArchiveStackGuard(char* to);
@@ -189,10 +192,7 @@ class StackGuard final {
   // If the stack guard is triggered, but it is not an actual
   // stack overflow, then handle the interruption accordingly.
   Object* HandleInterrupts();
-
-  bool InterruptRequested() { return GetCurrentStackPosition() < climit(); }
-
-  void CheckAndHandleGCInterrupt();
+  void HandleGCInterrupt();
 
  private:
   StackGuard();

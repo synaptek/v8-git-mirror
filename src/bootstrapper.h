@@ -61,7 +61,7 @@ class SourceCodeCache final BASE_EMBEDDED {
   DISALLOW_COPY_AND_ASSIGN(SourceCodeCache);
 };
 
-enum ContextType { FULL_CONTEXT, THIN_CONTEXT };
+enum ContextType { FULL_CONTEXT, THIN_CONTEXT, DEBUG_CONTEXT };
 
 // The Boostrapper is the public interface for creating a JavaScript global
 // context.
@@ -115,8 +115,13 @@ class Bootstrapper final {
   static bool CompileBuiltin(Isolate* isolate, int index);
   static bool CompileExperimentalBuiltin(Isolate* isolate, int index);
   static bool CompileExtraBuiltin(Isolate* isolate, int index);
+  static bool CompileExperimentalExtraBuiltin(Isolate* isolate, int index);
   static bool CompileCodeStubBuiltin(Isolate* isolate, int index);
   static bool InstallCodeStubNatives(Isolate* isolate);
+
+  static void ExportFromRuntime(Isolate* isolate, Handle<JSObject> container);
+  static void ExportExperimentalFromRuntime(Isolate* isolate,
+                                            Handle<JSObject> container);
 
  private:
   Isolate* isolate_;

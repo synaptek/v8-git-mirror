@@ -2,17 +2,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "src/runtime/runtime-utils.h"
+
 #include <stdlib.h>
 #include <limits>
 
-#include "src/v8.h"
-
 #include "src/arguments.h"
-#include "src/debug.h"
+#include "src/debug/debug.h"
+#include "src/frames-inl.h"
+#include "src/isolate-inl.h"
 #include "src/messages.h"
 #include "src/runtime/runtime.h"
-#include "src/runtime/runtime-utils.h"
-
 
 namespace v8 {
 namespace internal {
@@ -96,7 +96,6 @@ RUNTIME_FUNCTION(Runtime_HomeObjectSymbol) {
 static MaybeHandle<Object> DefineClass(Isolate* isolate, Handle<Object> name,
                                        Handle<Object> super_class,
                                        Handle<JSFunction> constructor,
-                                       Handle<Script> script,
                                        int start_position, int end_position) {
   Handle<Object> prototype_parent;
   Handle<Object> constructor_parent;
@@ -137,6 +136,9 @@ static MaybeHandle<Object> DefineClass(Isolate* isolate, Handle<Object> name,
 
   Handle<Map> map =
       isolate->factory()->NewMap(JS_OBJECT_TYPE, JSObject::kHeaderSize);
+  if (constructor->map()->is_strong()) {
+    map->set_is_strong();
+  }
   Map::SetPrototype(map, prototype_parent);
   map->SetConstructor(*constructor);
   Handle<JSObject> prototype = isolate->factory()->NewJSObjectFromMap(map);
@@ -178,11 +180,6 @@ static MaybeHandle<Object> DefineClass(Isolate* isolate, Handle<Object> name,
 
   // Install private properties that are used to construct the FunctionToString.
   RETURN_ON_EXCEPTION(
-      isolate, Object::SetProperty(constructor,
-                                   isolate->factory()->class_script_symbol(),
-                                   script, STRICT),
-      Object);
-  RETURN_ON_EXCEPTION(
       isolate,
       Object::SetProperty(
           constructor, isolate->factory()->class_start_position_symbol(),
@@ -200,31 +197,29 @@ static MaybeHandle<Object> DefineClass(Isolate* isolate, Handle<Object> name,
 
 RUNTIME_FUNCTION(Runtime_DefineClass) {
   HandleScope scope(isolate);
-  DCHECK(args.length() == 6);
+  DCHECK(args.length() == 5);
   CONVERT_ARG_HANDLE_CHECKED(Object, name, 0);
   CONVERT_ARG_HANDLE_CHECKED(Object, super_class, 1);
   CONVERT_ARG_HANDLE_CHECKED(JSFunction, constructor, 2);
-  CONVERT_ARG_HANDLE_CHECKED(Script, script, 3);
-  CONVERT_SMI_ARG_CHECKED(start_position, 4);
-  CONVERT_SMI_ARG_CHECKED(end_position, 5);
+  CONVERT_SMI_ARG_CHECKED(start_position, 3);
+  CONVERT_SMI_ARG_CHECKED(end_position, 4);
 
   Handle<Object> result;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
       isolate, result, DefineClass(isolate, name, super_class, constructor,
-                                   script, start_position, end_position));
+                                   start_position, end_position));
   return *result;
 }
 
 
 RUNTIME_FUNCTION(Runtime_DefineClassStrong) {
   HandleScope scope(isolate);
-  DCHECK(args.length() == 6);
+  DCHECK(args.length() == 5);
   CONVERT_ARG_HANDLE_CHECKED(Object, name, 0);
   CONVERT_ARG_HANDLE_CHECKED(Object, super_class, 1);
   CONVERT_ARG_HANDLE_CHECKED(JSFunction, constructor, 2);
-  CONVERT_ARG_HANDLE_CHECKED(Script, script, 3);
-  CONVERT_SMI_ARG_CHECKED(start_position, 4);
-  CONVERT_SMI_ARG_CHECKED(end_position, 5);
+  CONVERT_SMI_ARG_CHECKED(start_position, 3);
+  CONVERT_SMI_ARG_CHECKED(end_position, 4);
 
   if (super_class->IsNull()) {
     THROW_NEW_ERROR_RETURN_FAILURE(
@@ -234,7 +229,7 @@ RUNTIME_FUNCTION(Runtime_DefineClassStrong) {
   Handle<Object> result;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
       isolate, result, DefineClass(isolate, name, super_class, constructor,
-                                   script, start_position, end_position));
+                                   start_position, end_position));
   return *result;
 }
 
@@ -253,37 +248,46 @@ RUNTIME_FUNCTION(Runtime_DefineClassMethod) {
 }
 
 
+RUNTIME_FUNCTION(Runtime_FinalizeClassDefinition) {
+  HandleScope scope(isolate);
+  DCHECK(args.length() == 2);
+  CONVERT_ARG_HANDLE_CHECKED(JSObject, constructor, 0);
+  CONVERT_ARG_HANDLE_CHECKED(JSObject, prototype, 1);
+
+  JSObject::MigrateSlowToFast(prototype, 0, "RuntimeToFastProperties");
+  JSObject::MigrateSlowToFast(constructor, 0, "RuntimeToFastProperties");
+
+  if (constructor->map()->is_strong()) {
+    DCHECK(prototype->map()->is_strong());
+    RETURN_FAILURE_ON_EXCEPTION(isolate, JSObject::Freeze(prototype));
+    Handle<Object> result;
+    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, result,
+                                       JSObject::Freeze(constructor));
+    return *result;
+  }
+  return *constructor;
+}
+
+
 RUNTIME_FUNCTION(Runtime_ClassGetSourceCode) {
   HandleScope shs(isolate);
   DCHECK(args.length() == 1);
   CONVERT_ARG_HANDLE_CHECKED(JSFunction, fun, 0);
 
-  Handle<Object> script;
-  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
-      isolate, script,
-      Object::GetProperty(fun, isolate->factory()->class_script_symbol()));
-  if (!script->IsScript()) {
-    return isolate->heap()->undefined_value();
-  }
-
   Handle<Symbol> start_position_symbol(
       isolate->heap()->class_start_position_symbol());
-  Handle<Object> start_position;
-  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
-      isolate, start_position, Object::GetProperty(fun, start_position_symbol));
+  Handle<Object> start_position =
+      JSReceiver::GetDataProperty(fun, start_position_symbol);
+  if (!start_position->IsSmi()) return isolate->heap()->undefined_value();
 
   Handle<Symbol> end_position_symbol(
       isolate->heap()->class_end_position_symbol());
-  Handle<Object> end_position;
-  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
-      isolate, end_position, Object::GetProperty(fun, end_position_symbol));
+  Handle<Object> end_position =
+      JSReceiver::GetDataProperty(fun, end_position_symbol);
+  CHECK(end_position->IsSmi());
 
-  if (!start_position->IsSmi() || !end_position->IsSmi() ||
-      !Handle<Script>::cast(script)->HasValidSource()) {
-    return isolate->ThrowIllegalOperation();
-  }
-
-  Handle<String> source(String::cast(Handle<Script>::cast(script)->source()));
+  Handle<String> source(
+      String::cast(Script::cast(fun->shared()->script())->source()));
   return *isolate->factory()->NewSubString(
       source, Handle<Smi>::cast(start_position)->value(),
       Handle<Smi>::cast(end_position)->value());
@@ -377,7 +381,7 @@ RUNTIME_FUNCTION(Runtime_LoadKeyedFromSuper) {
 
   Handle<Name> name;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, name,
-                                     Runtime::ToName(isolate, key));
+                                     Object::ToName(isolate, key));
   // TODO(verwaest): Unify using LookupIterator.
   if (name->AsArrayIndex(&index)) {
     ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
@@ -474,7 +478,7 @@ static Object* StoreKeyedToSuper(Isolate* isolate, Handle<JSObject> home_object,
   }
   Handle<Name> name;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, name,
-                                     Runtime::ToName(isolate, key));
+                                     Object::ToName(isolate, key));
   // TODO(verwaest): Unify using LookupIterator.
   if (name->AsArrayIndex(&index)) {
     return StoreElementToSuper(isolate, home_object, receiver, index, value,
@@ -521,14 +525,43 @@ RUNTIME_FUNCTION(Runtime_HandleStepInForDerivedConstructors) {
 
 
 RUNTIME_FUNCTION(Runtime_DefaultConstructorCallSuper) {
-  UNIMPLEMENTED();
-  return nullptr;
-}
+  HandleScope scope(isolate);
+  DCHECK(args.length() == 2);
+  CONVERT_ARG_HANDLE_CHECKED(JSFunction, original_constructor, 0);
+  CONVERT_ARG_HANDLE_CHECKED(JSFunction, actual_constructor, 1);
+  JavaScriptFrameIterator it(isolate);
 
+  // Prepare the callee to the super call. The super constructor is stored as
+  // the prototype of the constructor we are currently executing.
+  Handle<Object> super_constructor;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+      isolate, super_constructor,
+      Runtime::GetPrototype(isolate, actual_constructor));
 
-RUNTIME_FUNCTION(Runtime_CallSuperWithSpread) {
-  UNIMPLEMENTED();
-  return nullptr;
+  // Find the frame that holds the actual arguments passed to the function.
+  it.AdvanceToArgumentsFrame();
+  JavaScriptFrame* frame = it.frame();
+
+  // Prepare the array containing all passed arguments.
+  int argument_count = frame->GetArgumentsLength();
+  Handle<FixedArray> elements =
+      isolate->factory()->NewUninitializedFixedArray(argument_count);
+  for (int i = 0; i < argument_count; ++i) {
+    elements->set(i, frame->GetParameter(i));
+  }
+  Handle<JSArray> arguments = isolate->factory()->NewJSArrayWithElements(
+      elements, FAST_ELEMENTS, argument_count);
+
+  // Call %reflect_construct(<super>, <args>, <new.target>) now.
+  Handle<JSFunction> reflect = isolate->reflect_construct();
+  Handle<Object> argv[] = {super_constructor, arguments, original_constructor};
+  Handle<Object> result;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+      isolate, result,
+      Execution::Call(isolate, reflect, isolate->factory()->undefined_value(),
+                      arraysize(argv), argv));
+
+  return *result;
 }
 }  // namespace internal
 }  // namespace v8

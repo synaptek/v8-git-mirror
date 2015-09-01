@@ -33,9 +33,10 @@
 
 #include "include/v8-profiler.h"
 #include "src/allocation-tracker.h"
-#include "src/debug.h"
+#include "src/debug/debug.h"
 #include "src/hashmap.h"
 #include "src/heap-profiler.h"
+#include "src/heap-snapshot-generator-inl.h"
 #include "test/cctest/cctest.h"
 
 using i::AllocationTraceNode;
@@ -479,6 +480,37 @@ TEST(HeapSnapshotSymbol) {
       GetProperty(a, v8::HeapGraphEdge::kInternal, "name");
   CHECK(name);
   CHECK(v8_str("mySymbol")->Equals(name->GetName()));
+}
+
+
+void CheckSimdSnapshot(const char* program, const char* var_name) {
+  i::FLAG_harmony_simd = true;
+  LocalContext env;
+  v8::HandleScope scope(env->GetIsolate());
+  v8::HeapProfiler* heap_profiler = env->GetIsolate()->GetHeapProfiler();
+
+  CompileRun(program);
+  const v8::HeapSnapshot* snapshot = heap_profiler->TakeHeapSnapshot();
+  CHECK(ValidateSnapshot(snapshot));
+  const v8::HeapGraphNode* global = GetGlobalObject(snapshot);
+  const v8::HeapGraphNode* var =
+      GetProperty(global, v8::HeapGraphEdge::kProperty, var_name);
+  CHECK(var);
+  CHECK_EQ(var->GetType(), v8::HeapGraphNode::kSimdValue);
+}
+
+
+TEST(HeapSnapshotSimd) {
+  CheckSimdSnapshot("a = SIMD.Float32x4();\n", "a");
+  CheckSimdSnapshot("a = SIMD.Int32x4();\n", "a");
+  CheckSimdSnapshot("a = SIMD.Uint32x4();\n", "a");
+  CheckSimdSnapshot("a = SIMD.Bool32x4();\n", "a");
+  CheckSimdSnapshot("a = SIMD.Int16x8();\n", "a");
+  CheckSimdSnapshot("a = SIMD.Uint16x8();\n", "a");
+  CheckSimdSnapshot("a = SIMD.Bool16x8();\n", "a");
+  CheckSimdSnapshot("a = SIMD.Int8x16();\n", "a");
+  CheckSimdSnapshot("a = SIMD.Uint8x16();\n", "a");
+  CheckSimdSnapshot("a = SIMD.Bool8x16();\n", "a");
 }
 
 
